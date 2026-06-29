@@ -13,7 +13,7 @@ const CALENDAR_SOURCE_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.
 
 // Cache, damit nicht bei jeder Anfrage neu von Forex Factory geladen wird
 let cache = { data: null, lastFetch: 0 };
-const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 Minuten
+const CACHE_DURATION_MS = 60 * 1000; // 1 Minute
 
 app.get('/', (req, res) => {
   res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/health'] });
@@ -91,7 +91,7 @@ app.get('/calendar/today', async (req, res) => {
 const GEOPOLITICS_SOURCE_URL = 'https://www.financialjuice.com/feed.ashx?xy=rss';
 
 let geoCache = { data: null, lastFetch: 0 };
-const GEO_CACHE_DURATION_MS = 3 * 60 * 1000; // 3 Minuten — Feed ist sehr aktiv
+const GEO_CACHE_DURATION_MS = 60 * 1000; // 1 Minute — Feed ist sehr aktiv
 
 // Schlagworte die auf markt-relevante geopolitische / sicherheitsrelevante News hinweisen.
 // FinancialJuice deckt bereits viel Markt-Relevanz ab, aber wir filtern zusätzlich
