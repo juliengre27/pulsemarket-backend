@@ -16,11 +16,11 @@ let cache = { data: null, lastFetch: 0 };
 const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 Minuten
 
 app.get('/', (req, res) => {
-  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/health'] });
+  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/health'] });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', source: CALENDAR_SOURCE_URL });
+  res.json({ status: 'ok', sources: [CALENDAR_SOURCE_URL, 'tagesschau RSS'] });
 });
 
 function impactToLevel(impact) {
@@ -82,6 +82,80 @@ app.get('/calendar/today', async (req, res) => {
   } catch (err) {
     console.error('Fehler beim Abrufen des Kalenders:', err.message);
     res.status(500).json({ error: 'Konnte Kalenderdaten nicht laden', details: err.message });
+  }
+});
+
+// ============ GEOPOLITIK / MARKT-NEWS FEED ============
+// FinancialJuice ist explizit für "Real-Time Market Moving News For Day Traders"
+// gebaut — komplett öffentlich, kostenlos, kein API-Key nötig.
+const GEOPOLITICS_SOURCE_URL = 'https://www.financialjuice.com/feed.ashx?xy=rss';
+
+let geoCache = { data: null, lastFetch: 0 };
+const GEO_CACHE_DURATION_MS = 3 * 60 * 1000; // 3 Minuten — Feed ist sehr aktiv
+
+// Schlagworte die auf markt-relevante geopolitische / sicherheitsrelevante News hinweisen.
+// FinancialJuice deckt bereits viel Markt-Relevanz ab, aber wir filtern zusätzlich
+// auf Krieg/Konflikt/Zentralbank-Themen für den fokussierten Sidebar-Feed.
+const GEO_KEYWORDS = [
+  'iran', 'israel', 'russia', 'ukraine', 'china', 'taiwan', 'nato',
+  'strike', 'missile', 'drone', 'attack', 'war', 'military', 'troops',
+  'sanction', 'ceasefire', 'hormuz', 'hezbollah', 'embargo',
+  'fed', 'rate', 'inflation', 'opec', 'oil', 'gold', 'dollar',
+  'bahrain', 'kuwait', 'gulf', 'syria', 'lebanon',
+];
+
+function extractRssItems(xml) {
+  const items = [];
+  const itemBlocks = xml.split('<item>').slice(1);
+
+  for (const block of itemBlocks.slice(0, 60)) {
+    const titleMatch = block.match(/<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/title>/s);
+    const linkMatch = block.match(/<link>(.*?)<\/link>/s);
+    const pubDateMatch = block.match(/<pubDate>(.*?)<\/pubDate>/s);
+    const descMatch = block.match(/<description>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/description>/s);
+
+    if (titleMatch) {
+      items.push({
+        title: titleMatch[1].trim().replace(/^FinancialJuice:\s*/, ''),
+        link: linkMatch ? linkMatch[1].trim() : '',
+        pubDate: pubDateMatch ? pubDateMatch[1].trim() : '',
+        description: descMatch ? descMatch[1].trim().replace(/<[^>]+>/g, '').slice(0, 200) : '',
+      });
+    }
+  }
+
+  return items;
+}
+
+function isMarketRelevant(item) {
+  const text = item.title.toLowerCase();
+  return GEO_KEYWORDS.some(kw => text.includes(kw));
+}
+
+app.get('/geopolitics/today', async (req, res) => {
+  try {
+    const now = Date.now();
+
+    if (geoCache.data && now - geoCache.lastFetch < GEO_CACHE_DURATION_MS) {
+      return res.json({ source: 'cache', ...geoCache.data });
+    }
+
+    const response = await fetch(GEOPOLITICS_SOURCE_URL);
+
+    if (!response.ok) {
+      throw new Error(`FinancialJuice RSS antwortete mit Status ${response.status}`);
+    }
+
+    const xml = await response.text();
+    const allItems = extractRssItems(xml);
+    const relevant = allItems.filter(isMarketRelevant).slice(0, 10);
+
+    geoCache = { data: { items: relevant, count: relevant.length }, lastFetch: now };
+
+    res.json({ source: 'live', items: relevant, count: relevant.length });
+  } catch (err) {
+    console.error('Fehler beim Abrufen der Geopolitik-News:', err.message);
+    res.status(500).json({ error: 'Konnte Geopolitik-Feed nicht laden', details: err.message });
   }
 });
 
