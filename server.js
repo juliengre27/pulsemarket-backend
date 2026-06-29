@@ -4,24 +4,38 @@ const app = express();
 
 app.use(cors());
 
-const FINNHUB_KEY = process.env.FINNHUB_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-if (!FINNHUB_KEY) {
-  console.error('FEHLER: FINNHUB_API_KEY ist nicht gesetzt. Bitte als Environment Variable hinzufügen.');
-}
+// Diese Quelle ist komplett kostenlos und öffentlich — kein API-Key nötig.
+// Forex Factory veröffentlicht ihren Wirtschaftskalender als wöchentliche JSON-Datei,
+// die von vielen MT4/MT5 Trading-Tools genutzt wird.
+const CALENDAR_SOURCE_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.json';
 
-// Cache to avoid hitting Finnhub rate limits
+// Cache, damit nicht bei jeder Anfrage neu von Forex Factory geladen wird
 let cache = { data: null, lastFetch: 0 };
-const CACHE_DURATION_MS = 60 * 1000; // 60 seconds
+const CACHE_DURATION_MS = 5 * 60 * 1000; // 5 Minuten
 
 app.get('/', (req, res) => {
   res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/health'] });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', hasApiKey: !!FINNHUB_KEY });
+  res.json({ status: 'ok', source: CALENDAR_SOURCE_URL });
 });
+
+function impactToLevel(impact) {
+  if (impact === 'High') return 'High';
+  if (impact === 'Medium') return 'Medium';
+  return 'Low';
+}
+
+// Ordnet Länder-Kürzel grob den Assets zu, die PulseMarket trackt.
+// USD-News betreffen alle drei Assets am stärksten.
+function assetsForCountry(country) {
+  if (country === 'USD') return ['gold', 'nas', 'btc'];
+  if (country === 'EUR' || country === 'GBP') return ['gold'];
+  return ['gold', 'btc'];
+}
 
 app.get('/calendar/today', async (req, res) => {
   try {
@@ -31,30 +45,34 @@ app.get('/calendar/today', async (req, res) => {
       return res.json({ source: 'cache', ...cache.data });
     }
 
-    const today = new Date().toISOString().split('T')[0];
-    const url = `https://finnhub.io/api/v1/calendar/economic?from=${today}&to=${today}&token=${FINNHUB_KEY}`;
-
-    const response = await fetch(url);
+    const response = await fetch(CALENDAR_SOURCE_URL);
 
     if (!response.ok) {
-      throw new Error(`Finnhub responded with status ${response.status}`);
+      throw new Error(`Forex Factory Feed antwortete mit Status ${response.status}`);
     }
 
     const raw = await response.json();
 
-    const processed = (raw.economicCalendar || []).map(item => {
-      const time = new Date(item.time);
+    const today = new Date();
+    const todayStr = today.toISOString().split('T')[0];
+
+    const todaysEvents = raw.filter(item => {
+      return item.date && item.date.startsWith(todayStr);
+    });
+
+    const processed = todaysEvents.map((item, idx) => {
+      const time = new Date(item.date);
       return {
-        id: `${item.event}-${item.time}`.replace(/\s+/g, '-'),
+        id: `${item.title}-${item.date}-${idx}`.replace(/\s+/g, '-'),
         time: time.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }),
         timestamp: Math.floor(time.getTime() / 1000),
-        title: item.event,
+        title: item.title,
         country: item.country,
-        impact: item.impact === 3 ? 'High' : item.impact === 2 ? 'Medium' : 'Low',
-        actual: item.actual,
-        forecast: item.estimate,
-        previous: item.prev,
-        unit: item.unit || '',
+        impact: impactToLevel(item.impact),
+        actual: item.actual || null,
+        forecast: item.forecast || null,
+        previous: item.previous || null,
+        assets: assetsForCountry(item.country),
       };
     });
 
