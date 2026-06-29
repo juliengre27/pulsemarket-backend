@@ -51,19 +51,42 @@ body{
   padding:0;
   margin-bottom:24px;
   overflow:hidden;
-  background:
-    radial-gradient(circle at 80% 10%, rgba(201,162,58,0.22) 0%, transparent 45%),
-    radial-gradient(circle at 15% 85%, rgba(201,162,58,0.10) 0%, transparent 40%),
-    #0a0a0a;
-  background-size:200% 200%;
-  background-position:0% 0%;
+  background:#0a0a0a;
   border:1px solid rgba(255,255,255,0.06);
-  animation:heroBgShift 8s ease-in-out infinite alternate;
 }
 
-@keyframes heroBgShift{
-  0%{background-position:0% 0%;}
-  100%{background-position:35% 25%;}
+.hero::before{
+  content:'';
+  position:absolute;
+  top:0;left:-30%;
+  width:30%;height:100%;
+  background:linear-gradient(90deg, transparent, rgba(201,162,58,0.08), transparent);
+  animation:heroScan 6s linear infinite;
+  pointer-events:none;
+  z-index:0;
+}
+
+@keyframes heroScan{
+  0%{left:-30%;}
+  100%{left:130%;}
+}
+
+.hero::after{
+  content:'';
+  position:absolute;
+  top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg, transparent, var(--gold-l), transparent);
+  background-size:50% 100%;
+  background-repeat:no-repeat;
+  animation:heroTopLine 4s linear infinite;
+  pointer-events:none;
+  z-index:1;
+  opacity:0.6;
+}
+
+@keyframes heroTopLine{
+  0%{background-position:-100% 0;}
+  100%{background-position:200% 0;}
 }
 
 .hero-top{
@@ -164,6 +187,14 @@ body{
 }
 .stat-card-trend.t-bull{color:var(--green-l)}
 .stat-card-trend.t-bear{color:var(--red-l)}
+.stat-card-trend.fng-extreme-fear{color:var(--red-l)}
+.stat-card-trend.fng-fear{color:#e0935a}
+.stat-card-trend.fng-neutral{color:var(--text2)}
+.stat-card-trend.fng-greed{color:#9ad17a}
+.stat-card-trend.fng-extreme-greed{color:var(--green-l)}
+.stat-card-source{
+  font-size:10px;color:var(--text3);margin-top:6px;
+}
 .stat-card-sparkline{
   position:absolute;bottom:0;right:0;width:90px;height:36px;opacity:0.5;
 }
@@ -203,35 +234,45 @@ body{
   100%{box-shadow:0 0 0 0 rgba(52,211,153,0)}
 }
 
-/* HEADER CALENDAR WIDGET — always visible, no toggle */
-.header-right{display:flex;align-items:center;gap:16px}
-.header-calendar{
-  display:flex;align-items:center;gap:10px;
+/* HERO SPLIT LAYOUT — headline left, calendar right */
+.hero-split{
+  display:grid;
+  grid-template-columns:1fr 300px;
+  gap:32px;
+  align-items:start;
+}
+.hero-split-left{min-width:0}
+.hero-split-right{
   background:rgba(255,255,255,0.04);
-  border:1px solid rgba(255,255,255,0.08);
-  border-radius:10px;
-  padding:8px 14px;
+  border:1px solid rgba(255,255,255,0.09);
+  border-radius:16px;
+  padding:18px 20px;
+  min-width:0;
 }
 .header-calendar-label{
-  font-size:9.5px;font-weight:600;color:var(--text3);
-  text-transform:uppercase;letter-spacing:0.05em;
-  border-right:1px solid rgba(255,255,255,0.08);
-  padding-right:10px;
-  flex-shrink:0;
+  font-size:11px;font-weight:600;color:var(--gold-l);
+  text-transform:uppercase;letter-spacing:0.06em;
+  margin-bottom:12px;
 }
-.header-calendar-list{display:flex;gap:14px}
-.header-cal-item{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.header-calendar-list{display:flex;flex-direction:column;gap:11px}
+.header-cal-item{display:flex;align-items:flex-start;gap:9px}
 .header-cal-item-dot{
-  width:6px;height:6px;border-radius:50%;flex-shrink:0;
+  width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:5px;
 }
 .header-cal-item-dot.impact-high-dot{background:var(--red-l)}
 .header-cal-item-dot.impact-medium-dot{background:var(--gold-l)}
-.header-cal-item-time{font-size:11px;color:var(--gold-l);font-weight:600}
+.header-cal-item-body{min-width:0;flex:1}
+.header-cal-item-time{font-size:12.5px;color:var(--gold-l);font-weight:600}
 .header-cal-item-title{
-  font-size:11px;color:var(--text2);
-  max-width:130px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:13px;color:var(--text);font-weight:500;line-height:1.4;
+  margin-top:2px;
 }
-.header-cal-empty{font-size:11px;color:var(--text3)}
+.header-cal-empty{font-size:12.5px;color:var(--text3)}
+
+@media (max-width:760px){
+  .hero-split{grid-template-columns:1fr}
+  .hero-split-right{order:-1}
+}
 
 @media (max-width:760px){
   .header-calendar{display:none}
@@ -711,24 +752,26 @@ body{
               <div class="brand-name">PulseMarket</div>
             </div>
           </div>
-          <div class="header-right">
-            <div class="header-calendar" id="header-calendar-widget">
-              <div class="header-calendar-label">Kalender</div>
-              <div id="header-cal-list" class="header-calendar-list"></div>
-            </div>
-            <div class="live-status">
-              <span class="live-dot"></span>
-              <span id="live-clock" class="mono">Live</span>
-            </div>
+          <div class="live-status">
+            <span class="live-dot"></span>
+            <span id="live-clock" class="mono">Live</span>
           </div>
         </div>
 
-        <div class="hero-eyebrow">
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
-          Markt-Cockpit · Live
+        <div class="hero-split">
+          <div class="hero-split-left">
+            <div class="hero-eyebrow">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+              Markt-Cockpit · Live
+            </div>
+            <div class="hero-title">Der Markt bewegt sich.<br>Du weißt zuerst, warum.</div>
+            <div class="hero-sub">Wirtschaftskalender, Geopolitik und KI-Erklärungen für Gold, NAS100 und Bitcoin — an einem Ort, in Klartext.</div>
+          </div>
+          <div class="hero-split-right">
+            <div class="header-calendar-label">Heute im Kalender</div>
+            <div id="header-cal-list" class="header-calendar-list"></div>
+          </div>
         </div>
-        <div class="hero-title">Der Markt bewegt sich.<br>Du weißt zuerst, warum.</div>
-        <div class="hero-sub">Wirtschaftskalender, Geopolitik und KI-Erklärungen für Gold, NAS100 und Bitcoin — an einem Ort, in Klartext.</div>
       </div>
     </div>
 
@@ -737,39 +780,30 @@ body{
         <div class="stat-card-icon ic-gold">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e8b94d" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M9 9h3a2 2 0 010 4H9m3 0h2M9 9v6"/></svg>
         </div>
-        <div class="stat-card-label">Gold · XAUUSD</div>
-        <div class="stat-card-value">Bearish</div>
-        <div class="stat-card-trend t-bear">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6l8 8 4-4 6 6M21 16v-6h-6"/></svg>
-          GDP + PCE belasten
-        </div>
-        <svg class="stat-card-sparkline" viewBox="0 0 90 36" preserveAspectRatio="none"><polyline points="0,8 15,12 30,10 45,20 60,18 75,28 90,26" fill="none" stroke="#ef5350" stroke-width="2"/></svg>
+        <div class="stat-card-label">Gold · Fear &amp; Greed</div>
+        <div class="stat-card-value" id="fng-gold-score">—</div>
+        <div class="stat-card-trend" id="fng-gold-label">Lädt...</div>
+        <div class="stat-card-source" id="fng-gold-source"></div>
       </div>
 
       <div class="stat-card-hero">
         <div class="stat-card-icon ic-nas">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e8b94d" stroke-width="2"><path d="M3 17l6-6 4 4 8-8M21 7v6"/></svg>
         </div>
-        <div class="stat-card-label">NAS100</div>
-        <div class="stat-card-value">Bullish</div>
-        <div class="stat-card-trend t-bull">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 18l8-8 4 4 6-6M21 8v6h-6"/></svg>
-          Starkes GDP stützt
-        </div>
-        <svg class="stat-card-sparkline" viewBox="0 0 90 36" preserveAspectRatio="none"><polyline points="0,28 15,24 30,26 45,16 60,18 75,8 90,10" fill="none" stroke="#4ade80" stroke-width="2"/></svg>
+        <div class="stat-card-label">NAS100 · Fear &amp; Greed</div>
+        <div class="stat-card-value" id="fng-nas-score">—</div>
+        <div class="stat-card-trend" id="fng-nas-label">Lädt...</div>
+        <div class="stat-card-source" id="fng-nas-source"></div>
       </div>
 
       <div class="stat-card-hero">
         <div class="stat-card-icon ic-btc">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#e8b94d" stroke-width="2"><path d="M6 3v18M6 8h9a3 3 0 010 6H6m0 0h10a3 3 0 010 6H6"/></svg>
         </div>
-        <div class="stat-card-label">Bitcoin · BTC</div>
-        <div class="stat-card-value">Bearish</div>
-        <div class="stat-card-trend t-bear">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M3 6l8 8 4-4 6 6M21 16v-6h-6"/></svg>
-          Risk-off Stimmung
-        </div>
-        <svg class="stat-card-sparkline" viewBox="0 0 90 36" preserveAspectRatio="none"><polyline points="0,10 15,14 30,12 45,22 60,24 75,30 90,29" fill="none" stroke="#ef5350" stroke-width="2"/></svg>
+        <div class="stat-card-label">Bitcoin · Fear &amp; Greed</div>
+        <div class="stat-card-value" id="fng-btc-score">—</div>
+        <div class="stat-card-trend" id="fng-btc-label">Lädt...</div>
+        <div class="stat-card-source" id="fng-btc-source"></div>
       </div>
     </div>
   </div>
@@ -1009,11 +1043,13 @@ function updateHeaderCalendar(events){
   const relevant = highImpact.length > 0 ? highImpact : events.filter(ev => ev.impact === 'Medium');
   const display = relevant.length > 0 ? relevant : events;
 
-  listEl.innerHTML = display.slice(0, 3).map(ev => `
+  listEl.innerHTML = display.slice(0, 4).map(ev => `
     <div class="header-cal-item">
       <span class="header-cal-item-dot ${ev.impact === 'High' ? 'impact-high-dot' : 'impact-medium-dot'}"></span>
-      <span class="header-cal-item-time mono">${ev.time}</span>
-      <span class="header-cal-item-title">${ev.title}</span>
+      <div class="header-cal-item-body">
+        <span class="header-cal-item-time mono">${ev.time} Uhr</span>
+        <div class="header-cal-item-title">${ev.title}</div>
+      </div>
     </div>
   `).join('');
 }
@@ -1083,6 +1119,68 @@ function renderGeoFeed(items){
 
 fetchGeopolitics();
 setInterval(fetchGeopolitics, 60 * 1000);
+
+// ============ FEAR & GREED SENTIMENT ============
+function fngColorClass(label){
+  const map = {
+    'Extreme Fear': 'fng-extreme-fear',
+    'Fear': 'fng-fear',
+    'Neutral': 'fng-neutral',
+    'Greed': 'fng-greed',
+    'Extreme Greed': 'fng-extreme-greed',
+  };
+  return map[label] || 'fng-neutral';
+}
+
+function fngLabelDe(label){
+  const map = {
+    'Extreme Fear': 'Extreme Angst',
+    'Fear': 'Angst',
+    'Neutral': 'Neutral',
+    'Greed': 'Gier',
+    'Extreme Greed': 'Extreme Gier',
+  };
+  return map[label] || label;
+}
+
+function renderFngCard(prefix, data){
+  const scoreEl = document.getElementById(`fng-${prefix}-score`);
+  const labelEl = document.getElementById(`fng-${prefix}-label`);
+  const sourceEl = document.getElementById(`fng-${prefix}-source`);
+  if(!scoreEl) return;
+
+  if(!data || data.score == null){
+    scoreEl.textContent = '—';
+    labelEl.textContent = 'Nicht verfügbar';
+    if(sourceEl) sourceEl.textContent = '';
+    return;
+  }
+
+  scoreEl.textContent = data.score;
+  labelEl.textContent = fngLabelDe(data.label);
+  labelEl.className = 'stat-card-trend ' + fngColorClass(data.label);
+  if(sourceEl){
+    sourceEl.textContent = data.real
+      ? `Quelle: ${data.source}`
+      : `Näherung · ${data.source}`;
+  }
+}
+
+async function fetchFearAndGreed(){
+  try {
+    const res = await fetch(`${BACKEND_URL}/sentiment/fear-greed`);
+    if(!res.ok) throw new Error('Sentiment request failed: ' + res.status);
+    const data = await res.json();
+    renderFngCard('gold', data.gold);
+    renderFngCard('nas', data.nas);
+    renderFngCard('btc', data.btc);
+  } catch(err) {
+    console.warn('Fear & Greed Anfrage fehlgeschlagen:', err);
+  }
+}
+
+fetchFearAndGreed();
+setInterval(fetchFearAndGreed, 5 * 60 * 1000);
 
 // Live clock
 function updateClock(){
