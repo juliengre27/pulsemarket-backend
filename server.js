@@ -16,7 +16,7 @@ let cache = { data: null, lastFetch: 0 };
 const CACHE_DURATION_MS = 60 * 1000; // 1 Minute
 
 app.get('/', (req, res) => {
-  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/observation', '/health'] });
+  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/trump/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/observation', '/health'] });
 });
 
 app.get('/health', (req, res) => {
@@ -232,6 +232,32 @@ app.get('/geopolitics/today', async (req, res) => {
   } catch (err) {
     console.error('Fehler beim Abrufen der Geopolitik-News:', err.message);
     res.status(500).json({ error: 'Konnte Geopolitik-Feed nicht laden', details: err.message });
+  }
+});
+
+// Dediziertes Endpoint nur für Trumps Truth-Social-Posts — für die Hauptspalte,
+// die ausschließlich seine Original-Posts zeigen soll.
+let trumpOnlyCache = { data: null, lastFetch: 0 };
+const TRUMP_CACHE_DURATION_MS = 60 * 1000;
+
+app.get('/trump/today', async (req, res) => {
+  try {
+    const now = Date.now();
+
+    if (trumpOnlyCache.data && now - trumpOnlyCache.lastFetch < TRUMP_CACHE_DURATION_MS) {
+      return res.json({ source: 'cache', ...trumpOnlyCache.data });
+    }
+
+    const items = await fetchTrumpItems();
+    const tagged = items.map(item => ({ ...item, assets: tagAssetsForNews(item) }));
+
+    const payload = { items: tagged, count: tagged.length };
+    trumpOnlyCache = { data: payload, lastFetch: now };
+
+    res.json({ source: 'live', ...payload });
+  } catch (err) {
+    console.error('Fehler beim Abrufen der Trump-Posts:', err.message);
+    res.status(500).json({ error: 'Konnte Trump-Feed nicht laden', details: err.message });
   }
 });
 
