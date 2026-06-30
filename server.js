@@ -16,7 +16,7 @@ let cache = { data: null, lastFetch: 0 };
 const CACHE_DURATION_MS = 60 * 1000; // 1 Minute
 
 app.get('/', (req, res) => {
-  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/signal', '/health'] });
+  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/observation', '/health'] });
 });
 
 app.get('/health', (req, res) => {
@@ -362,6 +362,20 @@ function aggregateTo4H(hourlyCandles) {
   });
 }
 
+// Berechnet eine vollständige EMA-Zeitreihe (für die Chart-Linie, nicht nur den letzten Wert)
+function calcEMASeries(candles, period) {
+  if (candles.length < period) return [];
+  const k = 2 / (period + 1);
+  const series = [];
+  let ema = candles.slice(0, period).reduce((sum, c) => sum + c.close, 0) / period;
+  series.push({ time: candles[period - 1].time, value: ema });
+  for (let i = period; i < candles.length; i++) {
+    ema = candles[i].close * k + ema * (1 - k);
+    series.push({ time: candles[i].time, value: ema });
+  }
+  return series;
+}
+
 app.get('/gold/candles/:timeframe', async (req, res) => {
   try {
     const tf = req.params.timeframe;
@@ -375,7 +389,7 @@ app.get('/gold/candles/:timeframe', async (req, res) => {
     const cacheKey = tf;
 
     if (goldChartCache[cacheKey] && now - goldChartCache[cacheKey].lastFetch < GOLD_CHART_CACHE_DURATION_MS) {
-      return res.json({ source: 'cache', candles: goldChartCache[cacheKey].candles, timeframe: tf });
+      return res.json({ source: 'cache', ...goldChartCache[cacheKey].payload });
     }
 
     let candles = await fetchYahooCandles(config.interval, config.range);
@@ -384,9 +398,20 @@ app.get('/gold/candles/:timeframe', async (req, res) => {
       candles = aggregateTo4H(candles);
     }
 
-    goldChartCache[cacheKey] = { candles, lastFetch: now };
+    const ema20 = calcEMASeries(candles, 20);
+    const ema50 = calcEMASeries(candles, 50);
 
-    res.json({ source: 'live', candles, timeframe: tf, count: candles.length });
+    const payload = {
+      candles,
+      ema20,
+      ema50,
+      timeframe: tf,
+      count: candles.length,
+    };
+
+    goldChartCache[cacheKey] = { payload, lastFetch: now };
+
+    res.json({ source: 'live', ...payload });
   } catch (err) {
     console.error('Fehler beim Abrufen der Gold-Kerzendaten:', err.message);
     res.status(500).json({ error: 'Konnte Gold-Chartdaten nicht laden', details: err.message });
@@ -616,7 +641,7 @@ function calcPremiumDiscount(candles, trend) {
   return { zone, position: Math.round(position * 100) };
 }
 
-app.get('/gold/signal', async (req, res) => {
+app.get('/gold/observation', async (req, res) => {
   try {
     const [h1Candles, h4CandlesRaw, d1Candles] = await Promise.all([
       fetchYahooCandles('60m', '1mo'),
@@ -742,47 +767,37 @@ app.get('/gold/signal', async (req, res) => {
       }
     }
 
-    // ── Finale Signal-Bestimmung ──
+    // ── Finale Bias-Bestimmung — bewusst als Beobachtung formuliert, ──
+    // ── kein Trading-Signal, kein Entry/SL/TP. ──
     const scoreDiff = bullScore - bearScore;
-    let signal = 'Neutral';
-    let confidence = 'Niedrig';
+    const totalScore = bullScore + bearScore;
+    let bias = 'Neutral';
+    let biasStrength = 'Niedrig';
 
     if (scoreDiff >= 6) {
-      signal = 'Long';
-      confidence = 'Hoch';
+      bias = 'Bullisch';
+      biasStrength = 'Hoch';
     } else if (scoreDiff >= 3) {
-      signal = 'Long';
-      confidence = 'Mittel';
+      bias = 'Bullisch';
+      biasStrength = 'Mittel';
     } else if (scoreDiff <= -6) {
-      signal = 'Short';
-      confidence = 'Hoch';
+      bias = 'Bearisch';
+      biasStrength = 'Hoch';
     } else if (scoreDiff <= -3) {
-      signal = 'Short';
-      confidence = 'Mittel';
-    }
-
-    // Stop-Loss / Take-Profit Vorschläge basierend auf ATR und Struktur
-    let stopLoss = null;
-    let takeProfit = null;
-    if (signal === 'Long' && atr_h1) {
-      stopLoss = (h1Analysis.lastSwingLow || lastPrice - atr_h1 * 1.5);
-      takeProfit = lastPrice + (lastPrice - stopLoss) * 2; // 1:2 RR
-    } else if (signal === 'Short' && atr_h1) {
-      stopLoss = (h1Analysis.lastSwingHigh || lastPrice + atr_h1 * 1.5);
-      takeProfit = lastPrice - (stopLoss - lastPrice) * 2;
+      bias = 'Bearisch';
+      biasStrength = 'Mittel';
     }
 
     res.json({
       source: 'live',
-      signal,
-      confidence,
+      bias,
+      biasStrength,
       lastPrice,
       bullScore,
       bearScore,
+      totalScore,
       reasons: reasons.map(r => r.text), // einfache Liste für bestehendes Frontend
       reasonsDetailed: reasons, // mit weight/dir für erweiterte Darstellung
-      stopLoss,
-      takeProfit,
       atr: atr_h1,
       premiumDiscount,
       equalLevels,
@@ -797,10 +812,10 @@ app.get('/gold/signal', async (req, res) => {
         h4: { structure: h4Analysis.structure, lastSwingHigh: h4Analysis.lastSwingHigh, lastSwingLow: h4Analysis.lastSwingLow },
         d1: { structure: d1Analysis.structure, lastSwingHigh: d1Analysis.lastSwingHigh, lastSwingLow: d1Analysis.lastSwingLow },
       },
-      disclaimer: 'Keine Anlageberatung. Automatisch generiertes Signal zu Bildungszwecken basierend auf Smart-Money-Konzept-Heuristiken (Marktstruktur, Order Blocks, FVGs, Liquidity Sweeps). Eigene Analyse und Risikomanagement bleiben erforderlich.',
+      disclaimer: 'Keine Anlageberatung und kein Trading-Signal. Diese Beobachtung fasst automatisch erkannte Marktstruktur-Muster (Trendrichtung, Order Blocks, Fair Value Gaps, Liquidity Sweeps) rein zu Bildungs- und Informationszwecken zusammen. Sie stellt keine Kauf- oder Verkaufsempfehlung dar. Jede Trading-Entscheidung liegt vollständig in der eigenen Verantwortung.',
     });
   } catch (err) {
-    console.error('Fehler bei der Gold-Signal-Berechnung:', err.message);
-    res.status(500).json({ error: 'Konnte Signal nicht berechnen', details: err.message });
+    console.error('Fehler bei der Gold-Bias-Berechnung:', err.message);
+    res.status(500).json({ error: 'Konnte Beobachtung nicht berechnen', details: err.message });
   }
 });
