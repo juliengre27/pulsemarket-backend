@@ -16,7 +16,7 @@ let cache = { data: null, lastFetch: 0 };
 const CACHE_DURATION_MS = 60 * 1000; // 1 Minute
 
 app.get('/', (req, res) => {
-  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/trump/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/observation', '/health'] });
+  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/trump/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/observation', '/gold/fundamentals', '/health'] });
 });
 
 app.get('/health', (req, res) => {
@@ -370,6 +370,117 @@ app.get('/sentiment/fear-greed', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`PulseMarket Backend läuft auf Port ${PORT}`);
+});
+
+// ============ FUNDAMENTALE GOLD-TREIBER — DXY & US10Y ============
+// Beide über Yahoo Finance, gleiche kostenlose Quelle wie der Gold-Chart.
+// DXY = Dollar-Index (^DXY), US10Y = 10-Jahres-Treasury-Rendite (^TNX, in 0.1%-Einheiten)
+const DXY_TICKER = '^DXY';
+const US10Y_TICKER = '^TNX';
+
+let fundamentalsCache = { data: null, lastFetch: 0 };
+const FUNDAMENTALS_CACHE_DURATION_MS = 3 * 60 * 1000; // 3 Minuten
+
+async function fetchYahooQuote(ticker) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=5d`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    },
+  });
+  if (!res.ok) throw new Error(`Yahoo Finance (${ticker}) antwortete mit Status ${res.status}`);
+  const data = await res.json();
+  const result = data.chart?.result?.[0];
+  if (!result) throw new Error(`Keine Daten für ${ticker}`);
+
+  const closes = (result.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+  if (closes.length < 2) throw new Error(`Zu wenig Datenpunkte für ${ticker}`);
+
+  const current = closes[closes.length - 1];
+  const previous = closes[closes.length - 2];
+  const changePercent = ((current - previous) / previous) * 100;
+
+  return { current, previous, changePercent };
+}
+
+app.get('/gold/fundamentals', async (req, res) => {
+  try {
+    const now = Date.now();
+
+    if (fundamentalsCache.data && now - fundamentalsCache.lastFetch < FUNDAMENTALS_CACHE_DURATION_MS) {
+      return res.json({ source: 'cache', ...fundamentalsCache.data });
+    }
+
+    const [dxyResult, us10yResult] = await Promise.allSettled([
+      fetchYahooQuote(DXY_TICKER),
+      fetchYahooQuote(US10Y_TICKER),
+    ]);
+
+    const dxy = dxyResult.status === 'fulfilled' ? dxyResult.value : null;
+    const us10y = us10yResult.status === 'fulfilled' ? us10yResult.value : null;
+
+    if (dxyResult.status === 'rejected') console.error('DXY Fehler:', dxyResult.reason?.message);
+    if (us10yResult.status === 'rejected') console.error('US10Y Fehler:', us10yResult.reason?.message);
+
+    // ── Fundamentale Interpretation für Gold ──
+    // DXY und Gold sind historisch stark invers korreliert: starker Dollar
+    // macht Gold für andere Währungen teurer -> Nachfrage sinkt.
+    // Steigende Realrenditen (US10Y) erhöhen die Opportunitätskosten,
+    // Gold zu halten (das keine Zinsen zahlt) -> typischerweise bearish für Gold.
+    const factors = [];
+
+    if (dxy) {
+      const dxyBearishForGold = dxy.changePercent > 0.1;
+      const dxyBullishForGold = dxy.changePercent < -0.1;
+      factors.push({
+        name: 'US-Dollar-Index (DXY)',
+        value: dxy.current.toFixed(2),
+        changePercent: dxy.changePercent,
+        implication: dxyBearishForGold ? 'bearish' : dxyBullishForGold ? 'bullish' : 'neutral',
+        explanation: dxyBearishForGold
+          ? `Dollar wird stärker (+${dxy.changePercent.toFixed(2)}%) — historisch belastend für Gold, da es für Nicht-Dollar-Käufer teurer wird.`
+          : dxyBullishForGold
+          ? `Dollar schwächt sich ab (${dxy.changePercent.toFixed(2)}%) — historisch unterstützend für Gold.`
+          : `Dollar nahezu unverändert (${dxy.changePercent.toFixed(2)}%) — kein klarer Impuls für Gold von dieser Seite.`,
+      });
+    }
+
+    if (us10y) {
+      const yieldBearishForGold = us10y.changePercent > 0.5;
+      const yieldBullishForGold = us10y.changePercent < -0.5;
+      factors.push({
+        name: 'US 10-Jahres-Rendite',
+        value: us10y.current.toFixed(2) + '%',
+        changePercent: us10y.changePercent,
+        implication: yieldBearishForGold ? 'bearish' : yieldBullishForGold ? 'bullish' : 'neutral',
+        explanation: yieldBearishForGold
+          ? `Renditen steigen (+${us10y.changePercent.toFixed(2)}%) — erhöht die Opportunitätskosten, zinsloses Gold zu halten. Historisch bearish.`
+          : yieldBullishForGold
+          ? `Renditen fallen (${us10y.changePercent.toFixed(2)}%) — senkt die Opportunitätskosten für Gold. Historisch bullisch.`
+          : `Renditen nahezu unverändert (${us10y.changePercent.toFixed(2)}%) — kein klarer Impuls von dieser Seite.`,
+      });
+    }
+
+    const bullishCount = factors.filter(f => f.implication === 'bullish').length;
+    const bearishCount = factors.filter(f => f.implication === 'bearish').length;
+
+    let fundamentalBias = 'Neutral';
+    if (bullishCount > bearishCount) fundamentalBias = 'Bullisch';
+    else if (bearishCount > bullishCount) fundamentalBias = 'Bearisch';
+
+    const payload = {
+      factors,
+      fundamentalBias,
+      disclaimer: 'Keine Anlageberatung. Diese fundamentale Einordnung beschreibt historisch beobachtete Korrelationen (Dollar-Stärke, Realrenditen) und dient ausschließlich Bildungs- und Informationszwecken.',
+    };
+
+    fundamentalsCache = { data: payload, lastFetch: now };
+
+    res.json({ source: 'live', ...payload });
+  } catch (err) {
+    console.error('Fehler beim Abrufen der fundamentalen Daten:', err.message);
+    res.status(500).json({ error: 'Konnte fundamentale Daten nicht laden', details: err.message });
+  }
 });
 
 // ============ GOLD CHART DATA — H1/H4/D1 ============
