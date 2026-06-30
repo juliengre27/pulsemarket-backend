@@ -16,11 +16,11 @@ let cache = { data: null, lastFetch: 0 };
 const CACHE_DURATION_MS = 60 * 1000; // 1 Minute
 
 app.get('/', (req, res) => {
-  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/sentiment/fear-greed', '/health'] });
+  res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/signal', '/health'] });
 });
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', sources: [CALENDAR_SOURCE_URL, 'FinancialJuice RSS', 'alternative.me FNG', 'CNN FNG'] });
+  res.json({ status: 'ok', sources: [CALENDAR_SOURCE_URL, 'FinancialJuice RSS', 'alternative.me FNG', 'CNN FNG', 'Yahoo Finance GC=F'] });
 });
 
 function impactToLevel(impact) {
@@ -268,4 +268,513 @@ app.get('/sentiment/fear-greed', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`PulseMarket Backend läuft auf Port ${PORT}`);
+});
+
+// ============ GOLD CHART DATA — H1/H4/D1 ============
+// Yahoo Finance's v8 chart endpoint funktioniert ohne offiziellen API-Key —
+// braucht nur einen Browser-User-Agent Header. Liefert echte OHLC-Kerzendaten.
+// Ticker GC=F = Gold Futures (COMEX), sehr nah an XAUUSD Spot-Preis.
+
+const YAHOO_CHART_URL = 'https://query1.finance.yahoo.com/v8/finance/chart/GC=F';
+
+let goldChartCache = {}; // pro Timeframe gecacht
+const GOLD_CHART_CACHE_DURATION_MS = 2 * 60 * 1000; // 2 Minuten
+
+const TIMEFRAME_CONFIG = {
+  '1h': { interval: '60m', range: '1mo' },
+  '4h': { interval: '60m', range: '3mo' }, // wird zu 4H aggregiert
+  '1d': { interval: '1d', range: '1y' },
+};
+
+async function fetchYahooCandles(interval, range) {
+  const url = `${YAHOO_CHART_URL}?interval=${interval}&range=${range}`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+    },
+  });
+  if (!res.ok) throw new Error(`Yahoo Finance antwortete mit Status ${res.status}`);
+  const data = await res.json();
+
+  const result = data.chart?.result?.[0];
+  if (!result) throw new Error('Keine Chart-Daten in Yahoo-Antwort');
+
+  const timestamps = result.timestamp || [];
+  const quote = result.indicators?.quote?.[0] || {};
+
+  const candles = timestamps.map((t, i) => ({
+    time: t,
+    open: quote.open?.[i],
+    high: quote.high?.[i],
+    low: quote.low?.[i],
+    close: quote.close?.[i],
+    volume: quote.volume?.[i],
+  })).filter(c => c.open != null && c.close != null);
+
+  return candles;
+}
+
+// Aggregiert 1H-Kerzen zu 4H-Kerzen
+function aggregateTo4H(hourlyCandles) {
+  const grouped = {};
+  hourlyCandles.forEach(c => {
+    const bucketStart = Math.floor(c.time / (4 * 3600)) * (4 * 3600);
+    if (!grouped[bucketStart]) grouped[bucketStart] = [];
+    grouped[bucketStart].push(c);
+  });
+
+  return Object.keys(grouped).sort((a, b) => a - b).map(key => {
+    const group = grouped[key];
+    return {
+      time: parseInt(key, 10),
+      open: group[0].open,
+      high: Math.max(...group.map(c => c.high)),
+      low: Math.min(...group.map(c => c.low)),
+      close: group[group.length - 1].close,
+      volume: group.reduce((sum, c) => sum + (c.volume || 0), 0),
+    };
+  });
+}
+
+app.get('/gold/candles/:timeframe', async (req, res) => {
+  try {
+    const tf = req.params.timeframe;
+    const config = TIMEFRAME_CONFIG[tf];
+
+    if (!config) {
+      return res.status(400).json({ error: 'Ungültiger Timeframe. Erlaubt: 1h, 4h, 1d' });
+    }
+
+    const now = Date.now();
+    const cacheKey = tf;
+
+    if (goldChartCache[cacheKey] && now - goldChartCache[cacheKey].lastFetch < GOLD_CHART_CACHE_DURATION_MS) {
+      return res.json({ source: 'cache', candles: goldChartCache[cacheKey].candles, timeframe: tf });
+    }
+
+    let candles = await fetchYahooCandles(config.interval, config.range);
+
+    if (tf === '4h') {
+      candles = aggregateTo4H(candles);
+    }
+
+    goldChartCache[cacheKey] = { candles, lastFetch: now };
+
+    res.json({ source: 'live', candles, timeframe: tf, count: candles.length });
+  } catch (err) {
+    console.error('Fehler beim Abrufen der Gold-Kerzendaten:', err.message);
+    res.status(500).json({ error: 'Konnte Gold-Chartdaten nicht laden', details: err.message });
+  }
+});
+
+// ============ GOLD SIGNAL ENGINE — SMC/ICT KONZEPTE ============
+// Berechnet ein institutionelles Smart-Money-Setup basierend auf:
+// - Marktstruktur H1/H4/D1 (höhere Hochs/Tiefs vs tiefere Hochs/Tiefs)
+// - Liquiditätsbrüche / Break of Structure
+// - Order Blocks (letzte gegenläufige Kerze vor starkem Move)
+// - Fair Value Gaps (Imbalance-Zonen)
+// - Liquidity Sweeps (Spring/Upthrust — Stop-Hunt vor Reversal)
+// - Equal Highs/Lows (Liquiditätspools)
+// - Premium/Discount (Position im aktuellen Range relativ zu 50%)
+// - ATR für Volatilitätskontext
+// - EMA20/EMA50 Momentum
+
+function detectSwings(candles, lookback = 5) {
+  const swings = [];
+  for (let i = lookback; i < candles.length - lookback; i++) {
+    const slice = candles.slice(i - lookback, i + lookback + 1);
+    const current = candles[i];
+    const isSwingHigh = slice.every(c => c.high <= current.high);
+    const isSwingLow = slice.every(c => c.low >= current.low);
+    if (isSwingHigh) swings.push({ type: 'high', time: current.time, price: current.high, index: i });
+    if (isSwingLow) swings.push({ type: 'low', time: current.time, price: current.low, index: i });
+  }
+  return swings;
+}
+
+function calcEMA(candles, period) {
+  if (candles.length < period) return null;
+  const k = 2 / (period + 1);
+  let ema = candles.slice(0, period).reduce((sum, c) => sum + c.close, 0) / period;
+  for (let i = period; i < candles.length; i++) {
+    ema = candles[i].close * k + ema * (1 - k);
+  }
+  return ema;
+}
+
+function calcATR(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  const trueRanges = [];
+  for (let i = 1; i < candles.length; i++) {
+    const curr = candles[i];
+    const prev = candles[i - 1];
+    const tr = Math.max(
+      curr.high - curr.low,
+      Math.abs(curr.high - prev.close),
+      Math.abs(curr.low - prev.close)
+    );
+    trueRanges.push(tr);
+  }
+  const recent = trueRanges.slice(-period);
+  return recent.reduce((sum, v) => sum + v, 0) / recent.length;
+}
+
+function analyzeTrend(candles) {
+  const swings = detectSwings(candles);
+  const highs = swings.filter(s => s.type === 'high').slice(-4);
+  const lows = swings.filter(s => s.type === 'low').slice(-4);
+
+  let structure = 'Range';
+  if (highs.length >= 2 && lows.length >= 2) {
+    const higherHighs = highs[highs.length - 1].price > highs[highs.length - 2].price;
+    const higherLows = lows[lows.length - 1].price > lows[lows.length - 2].price;
+    const lowerHighs = highs[highs.length - 1].price < highs[highs.length - 2].price;
+    const lowerLows = lows[lows.length - 1].price < lows[lows.length - 2].price;
+
+    if (higherHighs && higherLows) structure = 'Bullish';
+    else if (lowerHighs && lowerLows) structure = 'Bearish';
+  }
+
+  const lastClose = candles[candles.length - 1]?.close;
+  const lastSwingHigh = highs[highs.length - 1];
+  const lastSwingLow = lows[lows.length - 1];
+
+  let liquidityBreak = null;
+  if (lastSwingHigh && lastClose > lastSwingHigh.price) {
+    liquidityBreak = { type: 'bullish_bos', level: lastSwingHigh.price };
+  } else if (lastSwingLow && lastClose < lastSwingLow.price) {
+    liquidityBreak = { type: 'bearish_bos', level: lastSwingLow.price };
+  }
+
+  return {
+    structure, highs, lows,
+    lastSwingHigh: lastSwingHigh ? lastSwingHigh.price : null,
+    lastSwingLow: lastSwingLow ? lastSwingLow.price : null,
+    liquidityBreak,
+    lastClose,
+  };
+}
+
+// Order Block: letzte bärische Kerze vor einem starken bullischen Move (oder umgekehrt),
+// die als institutionelle Einstiegszone fungiert.
+function detectOrderBlocks(candles, atr) {
+  const blocks = [];
+  const minMoveSize = (atr || 1) * 1.5; // Move muss mind. 1.5x ATR sein um relevant zu sein
+
+  for (let i = 2; i < candles.length - 1; i++) {
+    const curr = candles[i];
+    const next = candles[i + 1];
+    const moveSize = Math.abs(next.close - curr.close);
+
+    // Bullish OB: bärische Kerze, gefolgt von starkem bullischem Move
+    if (curr.close < curr.open && next.close > next.open && moveSize > minMoveSize) {
+      blocks.push({
+        type: 'bullish',
+        time: curr.time,
+        high: curr.high,
+        low: curr.low,
+        index: i,
+      });
+    }
+    // Bearish OB: bullische Kerze, gefolgt von starkem bärischem Move
+    if (curr.close > curr.open && next.close < next.open && moveSize > minMoveSize) {
+      blocks.push({
+        type: 'bearish',
+        time: curr.time,
+        high: curr.high,
+        low: curr.low,
+        index: i,
+      });
+    }
+  }
+
+  // Nur die letzten 3 pro Richtung behalten, und nur unverletzte (Preis noch nicht durchgelaufen)
+  const lastClose = candles[candles.length - 1]?.close;
+  const valid = blocks.filter(b => {
+    if (b.type === 'bullish') return lastClose > b.low; // noch nicht unterhalb gebrochen
+    return lastClose < b.high; // noch nicht oberhalb gebrochen
+  });
+
+  const bullishOBs = valid.filter(b => b.type === 'bullish').slice(-2);
+  const bearishOBs = valid.filter(b => b.type === 'bearish').slice(-2);
+
+  return { bullish: bullishOBs, bearish: bearishOBs };
+}
+
+// Fair Value Gap: Lücke zwischen High von Kerze[i-1] und Low von Kerze[i+1]
+// bei starker Impulskerze dazwischen.
+function detectFVGs(candles) {
+  const fvgs = [];
+  for (let i = 1; i < candles.length - 1; i++) {
+    const prev = candles[i - 1];
+    const next = candles[i + 1];
+
+    // Bullish FVG: Low der nächsten Kerze über High der vorherigen
+    if (next.low > prev.high) {
+      fvgs.push({ type: 'bullish', top: next.low, bottom: prev.high, time: candles[i].time, index: i });
+    }
+    // Bearish FVG: High der nächsten Kerze unter Low der vorherigen
+    if (next.high < prev.low) {
+      fvgs.push({ type: 'bearish', top: prev.low, bottom: next.high, time: candles[i].time, index: i });
+    }
+  }
+
+  // Nur unausgefüllte FVGs behalten (Preis noch nicht komplett durchgelaufen)
+  const lastClose = candles[candles.length - 1]?.close;
+  const unfilled = fvgs.filter(f => {
+    if (f.type === 'bullish') return lastClose > f.bottom;
+    return lastClose < f.top;
+  });
+
+  return unfilled.slice(-4);
+}
+
+// Liquidity Sweep: Preis bricht kurz unter/über ein Swing-Level (sammelt Stops)
+// und kehrt sofort zurück — klassischer Spring/Upthrust.
+function detectLiquiditySweep(candles, swings) {
+  if (candles.length < 3) return null;
+  const last3 = candles.slice(-3);
+  const highs = swings.filter(s => s.type === 'high').slice(-3);
+  const lows = swings.filter(s => s.type === 'low').slice(-3);
+
+  for (const low of lows) {
+    const sweepCandle = last3.find(c => c.low < low.price && c.close > low.price);
+    if (sweepCandle) {
+      return { type: 'bullish_sweep', level: low.price, description: `Liquidität unter Swing Low ${low.price.toFixed(2)} abgeholt — sofortige Rückkehr über das Level (Spring)` };
+    }
+  }
+  for (const high of highs) {
+    const sweepCandle = last3.find(c => c.high > high.price && c.close < high.price);
+    if (sweepCandle) {
+      return { type: 'bearish_sweep', level: high.price, description: `Liquidität über Swing High ${high.price.toFixed(2)} abgeholt — sofortige Rückkehr unter das Level (Upthrust)` };
+    }
+  }
+  return null;
+}
+
+// Equal Highs/Lows: zwei oder mehr Swings auf annähernd gleichem Level = Liquiditätspool
+function detectEqualLevels(swings, tolerance = 0.0015) {
+  const highs = swings.filter(s => s.type === 'high');
+  const lows = swings.filter(s => s.type === 'low');
+
+  function findEqual(levels) {
+    for (let i = levels.length - 1; i > 0; i--) {
+      for (let j = i - 1; j >= 0; j--) {
+        const diff = Math.abs(levels[i].price - levels[j].price) / levels[i].price;
+        if (diff < tolerance) {
+          return { level: (levels[i].price + levels[j].price) / 2, count: 2 };
+        }
+      }
+    }
+    return null;
+  }
+
+  return {
+    equalHighs: findEqual(highs.slice(-6)),
+    equalLows: findEqual(lows.slice(-6)),
+  };
+}
+
+// Premium/Discount: Position des aktuellen Preises im Range zwischen letztem Swing High und Low
+function calcPremiumDiscount(candles, trend) {
+  if (!trend.lastSwingHigh || !trend.lastSwingLow) return null;
+  const range = trend.lastSwingHigh - trend.lastSwingLow;
+  if (range <= 0) return null;
+  const lastClose = candles[candles.length - 1]?.close;
+  const position = (lastClose - trend.lastSwingLow) / range;
+
+  let zone = 'Equilibrium';
+  if (position > 0.7) zone = 'Premium';
+  else if (position < 0.3) zone = 'Discount';
+
+  return { zone, position: Math.round(position * 100) };
+}
+
+app.get('/gold/signal', async (req, res) => {
+  try {
+    const [h1Candles, h4CandlesRaw, d1Candles] = await Promise.all([
+      fetchYahooCandles('60m', '1mo'),
+      fetchYahooCandles('60m', '3mo'),
+      fetchYahooCandles('1d', '1y'),
+    ]);
+
+    const h4Candles = aggregateTo4H(h4CandlesRaw);
+
+    const h1Analysis = analyzeTrend(h1Candles);
+    const h4Analysis = analyzeTrend(h4Candles);
+    const d1Analysis = analyzeTrend(d1Candles);
+
+    const ema20_h1 = calcEMA(h1Candles, 20);
+    const ema50_h1 = calcEMA(h1Candles, 50);
+    const atr_h1 = calcATR(h1Candles, 14);
+    const lastPrice = h1Candles[h1Candles.length - 1]?.close;
+
+    const h1Swings = detectSwings(h1Candles);
+    const orderBlocks = detectOrderBlocks(h1Candles, atr_h1);
+    const fvgs = detectFVGs(h1Candles);
+    const sweep = detectLiquiditySweep(h1Candles, h1Swings);
+    const equalLevels = detectEqualLevels(h1Swings);
+    const premiumDiscount = calcPremiumDiscount(h1Candles, h1Analysis);
+
+    // ── Signal-Logik — gewichtetes Scoring-System ──
+    // Jedes übereinstimmende Konzept erhöht den Score in eine Richtung.
+    let bullScore = 0;
+    let bearScore = 0;
+    const reasons = [];
+
+    // H4 Struktur (Hauptgewicht — 3 Punkte)
+    if (h4Analysis.structure === 'Bullish') {
+      bullScore += 3;
+      reasons.push({ text: 'H4-Struktur ist bullisch (höhere Hochs, höhere Tiefs)', weight: 'high', dir: 'bull' });
+    } else if (h4Analysis.structure === 'Bearish') {
+      bearScore += 3;
+      reasons.push({ text: 'H4-Struktur ist bearisch (tiefere Hochs, tiefere Tiefs)', weight: 'high', dir: 'bear' });
+    } else {
+      reasons.push({ text: 'H4-Struktur ist aktuell Range — kein klarer Trend', weight: 'low', dir: 'neutral' });
+    }
+
+    // D1 Struktur als übergeordneter Kontext (2 Punkte)
+    if (d1Analysis.structure === 'Bullish') {
+      bullScore += 2;
+      reasons.push({ text: 'D1 (Daily) bestätigt bullischen Gesamtkontext', weight: 'medium', dir: 'bull' });
+    } else if (d1Analysis.structure === 'Bearish') {
+      bearScore += 2;
+      reasons.push({ text: 'D1 (Daily) bestätigt bearischen Gesamtkontext', weight: 'medium', dir: 'bear' });
+    }
+
+    // H1 Liquiditätsbruch / BOS (2 Punkte)
+    if (h1Analysis.liquidityBreak?.type === 'bullish_bos') {
+      bullScore += 2;
+      reasons.push({ text: `H1 Break of Structure — Preis über letztem Swing High bei ${h1Analysis.liquidityBreak.level.toFixed(2)}`, weight: 'medium', dir: 'bull' });
+    } else if (h1Analysis.liquidityBreak?.type === 'bearish_bos') {
+      bearScore += 2;
+      reasons.push({ text: `H1 Break of Structure — Preis unter letztem Swing Low bei ${h1Analysis.liquidityBreak.level.toFixed(2)}`, weight: 'medium', dir: 'bear' });
+    }
+
+    // Liquidity Sweep (starkes Signal — 3 Punkte, da klassisches Reversal-Setup)
+    if (sweep?.type === 'bullish_sweep') {
+      bullScore += 3;
+      reasons.push({ text: sweep.description, weight: 'high', dir: 'bull' });
+    } else if (sweep?.type === 'bearish_sweep') {
+      bearScore += 3;
+      reasons.push({ text: sweep.description, weight: 'high', dir: 'bear' });
+    }
+
+    // Order Blocks in der Nähe des aktuellen Preises (1 Punkt je nahem OB)
+    const nearBullishOB = orderBlocks.bullish.find(ob => lastPrice <= ob.high * 1.003 && lastPrice >= ob.low * 0.997);
+    const nearBearishOB = orderBlocks.bearish.find(ob => lastPrice <= ob.high * 1.003 && lastPrice >= ob.low * 0.997);
+    if (nearBullishOB) {
+      bullScore += 1;
+      reasons.push({ text: `Preis nahe bullischem Order Block (${nearBullishOB.low.toFixed(2)}–${nearBullishOB.high.toFixed(2)})`, weight: 'low', dir: 'bull' });
+    }
+    if (nearBearishOB) {
+      bearScore += 1;
+      reasons.push({ text: `Preis nahe bearischem Order Block (${nearBearishOB.low.toFixed(2)}–${nearBearishOB.high.toFixed(2)})`, weight: 'low', dir: 'bear' });
+    }
+
+    // Fair Value Gaps in der Nähe (1 Punkt je nahem FVG)
+    const nearBullishFVG = fvgs.find(f => f.type === 'bullish' && lastPrice <= f.top * 1.003 && lastPrice >= f.bottom * 0.997);
+    const nearBearishFVG = fvgs.find(f => f.type === 'bearish' && lastPrice <= f.top * 1.003 && lastPrice >= f.bottom * 0.997);
+    if (nearBullishFVG) {
+      bullScore += 1;
+      reasons.push({ text: `Preis in offenem bullischem Fair Value Gap (${nearBullishFVG.bottom.toFixed(2)}–${nearBullishFVG.top.toFixed(2)})`, weight: 'low', dir: 'bull' });
+    }
+    if (nearBearishFVG) {
+      bearScore += 1;
+      reasons.push({ text: `Preis in offenem bearischem Fair Value Gap (${nearBearishFVG.bottom.toFixed(2)}–${nearBearishFVG.top.toFixed(2)})`, weight: 'low', dir: 'bear' });
+    }
+
+    // Equal Highs/Lows als Liquiditätsziel (informativ, kein Score)
+    if (equalLevels.equalLows) {
+      reasons.push({ text: `Equal Lows bei ${equalLevels.equalLows.level.toFixed(2)} — Liquiditätspool unterhalb`, weight: 'low', dir: 'neutral' });
+    }
+    if (equalLevels.equalHighs) {
+      reasons.push({ text: `Equal Highs bei ${equalLevels.equalHighs.level.toFixed(2)} — Liquiditätspool oberhalb`, weight: 'low', dir: 'neutral' });
+    }
+
+    // Premium/Discount (1 Punkt — kauft günstiger im Discount, verkauft teurer im Premium)
+    if (premiumDiscount) {
+      if (premiumDiscount.zone === 'Discount') {
+        bullScore += 1;
+        reasons.push({ text: `Preis im Discount (${premiumDiscount.position}% des Range) — günstige Zone für Longs`, weight: 'low', dir: 'bull' });
+      } else if (premiumDiscount.zone === 'Premium') {
+        bearScore += 1;
+        reasons.push({ text: `Preis im Premium (${premiumDiscount.position}% des Range) — teure Zone, eher für Shorts`, weight: 'low', dir: 'bear' });
+      } else {
+        reasons.push({ text: `Preis im Equilibrium (${premiumDiscount.position}% des Range) — keine klare Premium/Discount-Kante`, weight: 'low', dir: 'neutral' });
+      }
+    }
+
+    // EMA Momentum (1 Punkt)
+    if (ema20_h1 && ema50_h1) {
+      if (ema20_h1 > ema50_h1) {
+        bullScore += 1;
+        reasons.push({ text: 'EMA20 über EMA50 auf H1 — kurzfristiges Momentum bullisch', weight: 'low', dir: 'bull' });
+      } else {
+        bearScore += 1;
+        reasons.push({ text: 'EMA20 unter EMA50 auf H1 — kurzfristiges Momentum bearisch', weight: 'low', dir: 'bear' });
+      }
+    }
+
+    // ── Finale Signal-Bestimmung ──
+    const scoreDiff = bullScore - bearScore;
+    let signal = 'Neutral';
+    let confidence = 'Niedrig';
+
+    if (scoreDiff >= 6) {
+      signal = 'Long';
+      confidence = 'Hoch';
+    } else if (scoreDiff >= 3) {
+      signal = 'Long';
+      confidence = 'Mittel';
+    } else if (scoreDiff <= -6) {
+      signal = 'Short';
+      confidence = 'Hoch';
+    } else if (scoreDiff <= -3) {
+      signal = 'Short';
+      confidence = 'Mittel';
+    }
+
+    // Stop-Loss / Take-Profit Vorschläge basierend auf ATR und Struktur
+    let stopLoss = null;
+    let takeProfit = null;
+    if (signal === 'Long' && atr_h1) {
+      stopLoss = (h1Analysis.lastSwingLow || lastPrice - atr_h1 * 1.5);
+      takeProfit = lastPrice + (lastPrice - stopLoss) * 2; // 1:2 RR
+    } else if (signal === 'Short' && atr_h1) {
+      stopLoss = (h1Analysis.lastSwingHigh || lastPrice + atr_h1 * 1.5);
+      takeProfit = lastPrice - (stopLoss - lastPrice) * 2;
+    }
+
+    res.json({
+      source: 'live',
+      signal,
+      confidence,
+      lastPrice,
+      bullScore,
+      bearScore,
+      reasons: reasons.map(r => r.text), // einfache Liste für bestehendes Frontend
+      reasonsDetailed: reasons, // mit weight/dir für erweiterte Darstellung
+      stopLoss,
+      takeProfit,
+      atr: atr_h1,
+      premiumDiscount,
+      equalLevels,
+      orderBlocks: {
+        bullish: orderBlocks.bullish.map(ob => ({ high: ob.high, low: ob.low, time: ob.time })),
+        bearish: orderBlocks.bearish.map(ob => ({ high: ob.high, low: ob.low, time: ob.time })),
+      },
+      fvgs: fvgs.map(f => ({ type: f.type, top: f.top, bottom: f.bottom, time: f.time })),
+      liquiditySweep: sweep,
+      timeframes: {
+        h1: { structure: h1Analysis.structure, lastSwingHigh: h1Analysis.lastSwingHigh, lastSwingLow: h1Analysis.lastSwingLow },
+        h4: { structure: h4Analysis.structure, lastSwingHigh: h4Analysis.lastSwingHigh, lastSwingLow: h4Analysis.lastSwingLow },
+        d1: { structure: d1Analysis.structure, lastSwingHigh: d1Analysis.lastSwingHigh, lastSwingLow: d1Analysis.lastSwingLow },
+      },
+      disclaimer: 'Keine Anlageberatung. Automatisch generiertes Signal zu Bildungszwecken basierend auf Smart-Money-Konzept-Heuristiken (Marktstruktur, Order Blocks, FVGs, Liquidity Sweeps). Eigene Analyse und Risikomanagement bleiben erforderlich.',
+    });
+  } catch (err) {
+    console.error('Fehler bei der Gold-Signal-Berechnung:', err.message);
+    res.status(500).json({ error: 'Konnte Signal nicht berechnen', details: err.message });
+  }
 });
