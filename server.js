@@ -86,9 +86,12 @@ app.get('/calendar/today', async (req, res) => {
 });
 
 // ============ GEOPOLITIK / MARKT-NEWS FEED ============
-// FinancialJuice ist explizit für "Real-Time Market Moving News For Day Traders"
-// gebaut — komplett öffentlich, kostenlos, kein API-Key nötig.
+// Zwei kombinierte, komplett kostenlose Quellen ohne API-Key:
+// 1. FinancialJuice — "Real-Time Market Moving News For Day Traders"
+// 2. Google News RSS (gefiltert auf "Trump") — deckt seine öffentlichen
+//    Aussagen/Truth-Social/X-Posts ab, sobald sie von Medien aufgegriffen werden.
 const GEOPOLITICS_SOURCE_URL = 'https://www.financialjuice.com/feed.ashx?xy=rss';
+const TRUMP_NEWS_URL = 'https://news.google.com/rss/search?q=Trump+when:1d&hl=en-US&gl=US&ceid=US:en';
 
 let geoCache = { data: null, lastFetch: 0 };
 const GEO_CACHE_DURATION_MS = 60 * 1000; // 1 Minute — Feed ist sehr aktiv
@@ -104,6 +107,14 @@ const GEO_KEYWORDS = [
   'bahrain', 'kuwait', 'gulf', 'syria', 'lebanon',
 ];
 
+// Nur Trump-News mit echter Markt-/Wirtschafts-/Geopolitik-Relevanz durchlassen —
+// nicht jede beliebige Trump-Schlagzeile (z.B. reiner Innenpolitik-Klatsch).
+const TRUMP_RELEVANT_KEYWORDS = [
+  'tariff', 'trade', 'china', 'fed', 'rate', 'powell', 'economy', 'market',
+  'iran', 'israel', 'russia', 'ukraine', 'war', 'military', 'sanction',
+  'oil', 'gold', 'dollar', 'inflation', 'tax', 'deal',
+];
+
 function extractRssItems(xml) {
   const items = [];
   const itemBlocks = xml.split('<item>').slice(1);
@@ -113,6 +124,7 @@ function extractRssItems(xml) {
     const linkMatch = block.match(/<link>(.*?)<\/link>/s);
     const pubDateMatch = block.match(/<pubDate>(.*?)<\/pubDate>/s);
     const descMatch = block.match(/<description>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?<\/description>/s);
+    const sourceMatch = block.match(/<source[^>]*>(.*?)<\/source>/s);
 
     if (titleMatch) {
       items.push({
@@ -120,6 +132,7 @@ function extractRssItems(xml) {
         link: linkMatch ? linkMatch[1].trim() : '',
         pubDate: pubDateMatch ? pubDateMatch[1].trim() : '',
         description: descMatch ? descMatch[1].trim().replace(/<[^>]+>/g, '').slice(0, 200) : '',
+        sourceName: sourceMatch ? sourceMatch[1].trim() : null,
       });
     }
   }
@@ -132,6 +145,11 @@ function isMarketRelevant(item) {
   return GEO_KEYWORDS.some(kw => text.includes(kw));
 }
 
+function isTrumpNewsRelevant(item) {
+  const text = item.title.toLowerCase();
+  return TRUMP_RELEVANT_KEYWORDS.some(kw => text.includes(kw));
+}
+
 // Ordnet jeder News-Meldung die Assets zu, die sie wahrscheinlich betrifft —
 // basierend auf enthaltenen Schlagworten. Gold reagiert am breitesten
 // (Geopolitik, Zinsen, Dollar betreffen praktisch immer Gold als Safe Haven).
@@ -139,8 +157,8 @@ function tagAssetsForNews(item) {
   const text = item.title.toLowerCase();
   const assets = new Set();
 
-  const goldKeywords = ['gold', 'fed', 'rate', 'inflation', 'dollar', 'iran', 'israel', 'russia', 'ukraine', 'war', 'military', 'strike', 'missile', 'oil', 'opec', 'sanction', 'hormuz', 'gulf', 'safe haven', 'treasury'];
-  const nasKeywords = ['fed', 'rate', 'inflation', 'nasdaq', 'tech', 'stocks', 'earnings', 'nvidia', 'apple', 'microsoft', 'gdp'];
+  const goldKeywords = ['gold', 'fed', 'rate', 'inflation', 'dollar', 'iran', 'israel', 'russia', 'ukraine', 'war', 'military', 'strike', 'missile', 'oil', 'opec', 'sanction', 'hormuz', 'gulf', 'safe haven', 'treasury', 'tariff', 'trump'];
+  const nasKeywords = ['fed', 'rate', 'inflation', 'nasdaq', 'tech', 'stocks', 'earnings', 'nvidia', 'apple', 'microsoft', 'gdp', 'tariff', 'trump'];
   const btcKeywords = ['bitcoin', 'crypto', 'btc', 'eth', 'blockchain', 'fed', 'rate', 'dollar'];
 
   if (goldKeywords.some(kw => text.includes(kw))) assets.add('gold');
@@ -155,6 +173,27 @@ function tagAssetsForNews(item) {
   return Array.from(assets);
 }
 
+async function fetchFinancialJuiceItems() {
+  const response = await fetch(GEOPOLITICS_SOURCE_URL);
+  if (!response.ok) throw new Error(`FinancialJuice RSS antwortete mit Status ${response.status}`);
+  const xml = await response.text();
+  return extractRssItems(xml)
+    .filter(isMarketRelevant)
+    .map(item => ({ ...item, tag: 'Markt-relevant' }));
+}
+
+async function fetchTrumpItems() {
+  const response = await fetch(TRUMP_NEWS_URL, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+  });
+  if (!response.ok) throw new Error(`Google News RSS antwortete mit Status ${response.status}`);
+  const xml = await response.text();
+  return extractRssItems(xml)
+    .filter(isTrumpNewsRelevant)
+    .slice(0, 8)
+    .map(item => ({ ...item, tag: 'Trump' }));
+}
+
 app.get('/geopolitics/today', async (req, res) => {
   try {
     const now = Date.now();
@@ -163,22 +202,33 @@ app.get('/geopolitics/today', async (req, res) => {
       return res.json({ source: 'cache', ...geoCache.data });
     }
 
-    const response = await fetch(GEOPOLITICS_SOURCE_URL);
+    // Beide Quellen unabhängig abrufen — wenn eine fehlschlägt, soll die
+    // andere trotzdem durchkommen, statt dass der ganze Feed ausfällt.
+    const [fjResult, trumpResult] = await Promise.allSettled([
+      fetchFinancialJuiceItems(),
+      fetchTrumpItems(),
+    ]);
 
-    if (!response.ok) {
-      throw new Error(`FinancialJuice RSS antwortete mit Status ${response.status}`);
+    const fjItems = fjResult.status === 'fulfilled' ? fjResult.value : [];
+    const trumpItems = trumpResult.status === 'fulfilled' ? trumpResult.value : [];
+
+    if (fjResult.status === 'rejected') console.error('FinancialJuice Fehler:', fjResult.reason?.message);
+    if (trumpResult.status === 'rejected') console.error('Trump-News Fehler:', trumpResult.reason?.message);
+
+    // Beide Quellen mischen, nach Datum sortieren, auf Top 14 begrenzen
+    const combined = [...fjItems, ...trumpItems]
+      .sort((a, b) => new Date(b.pubDate).getTime() - new Date(a.pubDate).getTime())
+      .slice(0, 14)
+      .map(item => ({ ...item, assets: tagAssetsForNews(item) }));
+
+    if (fjItems.length === 0 && trumpItems.length === 0) {
+      throw new Error('Beide News-Quellen nicht erreichbar');
     }
 
-    const xml = await response.text();
-    const allItems = extractRssItems(xml);
-    const relevant = allItems.filter(isMarketRelevant).slice(0, 10).map(item => ({
-      ...item,
-      assets: tagAssetsForNews(item),
-    }));
+    const payload = { items: combined, count: combined.length };
+    geoCache = { data: payload, lastFetch: now };
 
-    geoCache = { data: { items: relevant, count: relevant.length }, lastFetch: now };
-
-    res.json({ source: 'live', items: relevant, count: relevant.length });
+    res.json({ source: 'live', ...payload });
   } catch (err) {
     console.error('Fehler beim Abrufen der Geopolitik-News:', err.message);
     res.status(500).json({ error: 'Konnte Geopolitik-Feed nicht laden', details: err.message });
@@ -470,6 +520,35 @@ function calcATR(candles, period = 14) {
   return recent.reduce((sum, v) => sum + v, 0) / recent.length;
 }
 
+// Wyckoff Selling Climax / Buying Climax — extremes Volumen am Ende eines
+// Trends, mit langem Docht in Gegenrichtung (Absorption durch Smart Money).
+function detectWyckoffClimax(candles) {
+  if (candles.length < 20) return null;
+
+  const recentVols = candles.slice(-20).map(c => c.volume || 0);
+  const avgVol = recentVols.reduce((s, v) => s + v, 0) / recentVols.length;
+  const last = candles[candles.length - 1];
+
+  if (!last.volume || avgVol === 0) return null;
+
+  const volRatio = last.volume / avgVol;
+  const bodySize = Math.abs(last.close - last.open);
+  const lowerWick = Math.min(last.open, last.close) - last.low;
+  const upperWick = last.high - Math.max(last.open, last.close);
+  const range = last.high - last.low || 0.0001;
+
+  // Selling Climax: extremes Volumen, langer unterer Docht, schließt im oberen Teil der Kerze
+  if (volRatio > 2 && lowerWick / range > 0.4 && (last.close - last.low) / range > 0.5) {
+    return { type: 'selling_climax', volRatio: Math.round(volRatio * 10) / 10 };
+  }
+  // Buying Climax: extremes Volumen, langer oberer Docht, schließt im unteren Teil der Kerze
+  if (volRatio > 2 && upperWick / range > 0.4 && (last.high - last.close) / range > 0.5) {
+    return { type: 'buying_climax', volRatio: Math.round(volRatio * 10) / 10 };
+  }
+
+  return null;
+}
+
 function analyzeTrend(candles) {
   const swings = detectSwings(candles);
   const highs = swings.filter(s => s.type === 'high').slice(-4);
@@ -666,6 +745,7 @@ app.get('/gold/observation', async (req, res) => {
     const sweep = detectLiquiditySweep(h1Candles, h1Swings);
     const equalLevels = detectEqualLevels(h1Swings);
     const premiumDiscount = calcPremiumDiscount(h1Candles, h1Analysis);
+    const wyckoffClimax = detectWyckoffClimax(h1Candles);
 
     // ── Signal-Logik — gewichtetes Scoring-System ──
     // Jedes übereinstimmende Konzept erhöht den Score in eine Richtung.
@@ -709,6 +789,15 @@ app.get('/gold/observation', async (req, res) => {
     } else if (sweep?.type === 'bearish_sweep') {
       bearScore += 3;
       reasons.push({ text: sweep.description, weight: 'high', dir: 'bear' });
+    }
+
+    // Wyckoff Climax (starkes Signal — 2 Punkte, klassisches Erschöpfungs-Muster)
+    if (wyckoffClimax?.type === 'selling_climax') {
+      bullScore += 2;
+      reasons.push({ text: `Wyckoff Selling Climax erkannt — Volumen ${wyckoffClimax.volRatio}x über Durchschnitt mit langem unterem Docht (mögliche Verkaufserschöpfung)`, weight: 'high', dir: 'bull' });
+    } else if (wyckoffClimax?.type === 'buying_climax') {
+      bearScore += 2;
+      reasons.push({ text: `Wyckoff Buying Climax erkannt — Volumen ${wyckoffClimax.volRatio}x über Durchschnitt mit langem oberem Docht (mögliche Kauferschöpfung)`, weight: 'high', dir: 'bear' });
     }
 
     // Order Blocks in der Nähe des aktuellen Preises (1 Punkt je nahem OB)
@@ -807,6 +896,7 @@ app.get('/gold/observation', async (req, res) => {
       },
       fvgs: fvgs.map(f => ({ type: f.type, top: f.top, bottom: f.bottom, time: f.time })),
       liquiditySweep: sweep,
+      wyckoffClimax,
       timeframes: {
         h1: { structure: h1Analysis.structure, lastSwingHigh: h1Analysis.lastSwingHigh, lastSwingLow: h1Analysis.lastSwingLow },
         h4: { structure: h4Analysis.structure, lastSwingHigh: h4Analysis.lastSwingHigh, lastSwingLow: h4Analysis.lastSwingLow },
