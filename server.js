@@ -86,12 +86,12 @@ app.get('/calendar/today', async (req, res) => {
 });
 
 // ============ GEOPOLITIK / MARKT-NEWS FEED ============
-// Zwei kombinierte, komplett kostenlose Quellen ohne API-Key:
+// Drei kombinierte, komplett kostenlose Quellen ohne API-Key:
 // 1. FinancialJuice — "Real-Time Market Moving News For Day Traders"
-// 2. Google News RSS (gefiltert auf "Trump") — deckt seine öffentlichen
-//    Aussagen/Truth-Social/X-Posts ab, sobald sie von Medien aufgegriffen werden.
+// 2. trumpstruth.org — echtes, kostenloses RSS-Archiv von Trumps
+//    Original-Posts auf Truth Social (nicht nur Medienberichte über ihn)
 const GEOPOLITICS_SOURCE_URL = 'https://www.financialjuice.com/feed.ashx?xy=rss';
-const TRUMP_NEWS_URL = 'https://news.google.com/rss/search?q=Trump+when:1d&hl=en-US&gl=US&ceid=US:en';
+const TRUMP_TRUTH_SOCIAL_URL = 'https://www.trumpstruth.org/feed';
 
 let geoCache = { data: null, lastFetch: 0 };
 const GEO_CACHE_DURATION_MS = 60 * 1000; // 1 Minute — Feed ist sehr aktiv
@@ -145,11 +145,6 @@ function isMarketRelevant(item) {
   return GEO_KEYWORDS.some(kw => text.includes(kw));
 }
 
-function isTrumpNewsRelevant(item) {
-  const text = item.title.toLowerCase();
-  return TRUMP_RELEVANT_KEYWORDS.some(kw => text.includes(kw));
-}
-
 // Ordnet jeder News-Meldung die Assets zu, die sie wahrscheinlich betrifft —
 // basierend auf enthaltenen Schlagworten. Gold reagiert am breitesten
 // (Geopolitik, Zinsen, Dollar betreffen praktisch immer Gold als Safe Haven).
@@ -183,15 +178,20 @@ async function fetchFinancialJuiceItems() {
 }
 
 async function fetchTrumpItems() {
-  const response = await fetch(TRUMP_NEWS_URL, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
-  });
-  if (!response.ok) throw new Error(`Google News RSS antwortete mit Status ${response.status}`);
+  const response = await fetch(TRUMP_TRUTH_SOCIAL_URL);
+  if (!response.ok) throw new Error(`Truth Social RSS antwortete mit Status ${response.status}`);
   const xml = await response.text();
-  return extractRssItems(xml)
-    .filter(isTrumpNewsRelevant)
-    .slice(0, 8)
-    .map(item => ({ ...item, tag: 'Trump' }));
+  const items = extractRssItems(xml);
+
+  // Truth-Social-Post-Titel sind oft nur kurze Auszüge des eigentlichen Inhalts.
+  // Wir prüfen Titel UND Description auf Markt-Relevanz, statt nur den Titel,
+  // damit echte Markt-relevante Posts nicht durchs Raster fallen.
+  const relevant = items.filter(item => {
+    const text = (item.title + ' ' + item.description).toLowerCase();
+    return TRUMP_RELEVANT_KEYWORDS.some(kw => text.includes(kw));
+  });
+
+  return relevant.slice(0, 8).map(item => ({ ...item, tag: 'Trump' }));
 }
 
 app.get('/geopolitics/today', async (req, res) => {
