@@ -132,6 +132,29 @@ function isMarketRelevant(item) {
   return GEO_KEYWORDS.some(kw => text.includes(kw));
 }
 
+// Ordnet jeder News-Meldung die Assets zu, die sie wahrscheinlich betrifft —
+// basierend auf enthaltenen Schlagworten. Gold reagiert am breitesten
+// (Geopolitik, Zinsen, Dollar betreffen praktisch immer Gold als Safe Haven).
+function tagAssetsForNews(item) {
+  const text = item.title.toLowerCase();
+  const assets = new Set();
+
+  const goldKeywords = ['gold', 'fed', 'rate', 'inflation', 'dollar', 'iran', 'israel', 'russia', 'ukraine', 'war', 'military', 'strike', 'missile', 'oil', 'opec', 'sanction', 'hormuz', 'gulf', 'safe haven', 'treasury'];
+  const nasKeywords = ['fed', 'rate', 'inflation', 'nasdaq', 'tech', 'stocks', 'earnings', 'nvidia', 'apple', 'microsoft', 'gdp'];
+  const btcKeywords = ['bitcoin', 'crypto', 'btc', 'eth', 'blockchain', 'fed', 'rate', 'dollar'];
+
+  if (goldKeywords.some(kw => text.includes(kw))) assets.add('gold');
+  if (nasKeywords.some(kw => text.includes(kw))) assets.add('nas');
+  if (btcKeywords.some(kw => text.includes(kw))) assets.add('btc');
+
+  // Fallback: wenn gar nichts zugeordnet werden konnte, gilt es für alle drei
+  if (assets.size === 0) {
+    assets.add('gold'); assets.add('nas'); assets.add('btc');
+  }
+
+  return Array.from(assets);
+}
+
 app.get('/geopolitics/today', async (req, res) => {
   try {
     const now = Date.now();
@@ -148,7 +171,10 @@ app.get('/geopolitics/today', async (req, res) => {
 
     const xml = await response.text();
     const allItems = extractRssItems(xml);
-    const relevant = allItems.filter(isMarketRelevant).slice(0, 10);
+    const relevant = allItems.filter(isMarketRelevant).slice(0, 10).map(item => ({
+      ...item,
+      assets: tagAssetsForNews(item),
+    }));
 
     geoCache = { data: { items: relevant, count: relevant.length }, lastFetch: now };
 
