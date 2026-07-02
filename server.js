@@ -114,89 +114,237 @@ app.get('/calendar/today', async (req, res) => {
 function buildPrediction(title, country) {
   const t = title.toLowerCase();
 
-  // ── US-Daten (beeinflussen Gold, NAS100, BTC am stärksten) ──
-  if(country === 'USD') {
+  // Hilfsfunktion: einfaches Objekt für Higher/Lower Szenarien
+  const pred = (hG, hN, hB, hR, lG, lN, lB, lR) => ({
+    higher: { gold: hG, nas: hN, btc: hB, reason: hR },
+    lower:  { gold: lG, nas: lN, btc: lB, reason: lR },
+  });
+  const speaker = (text) => ({ higher: null, lower: null, text });
 
-    if(t.includes('non-farm') || t.includes('nfp') || t.includes('employment change')) return {
-      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starker Arbeitsmarkt → Fed bleibt hawkish → Dollar steigt, Gold unter Druck' },
-      lower: { gold: 'bullish', nas: 'bearish', btc: 'neutral', reason: 'Schwacher Arbeitsmarkt → Fed könnte lockern → Dollar schwächer, Gold profitiert' },
-    };
+  // ── USD — Arbeitsmarkt ──
+  if(t.includes('non-farm') || t.includes('nfp')) return pred(
+    'bearish','bullish','neutral','Starker Arbeitsmarkt → Fed bleibt hawkish → Dollar steigt, Gold unter Druck',
+    'bullish','bearish','neutral','Schwacher Arbeitsmarkt → Fed könnte lockern → Dollar schwächer, Gold profitiert'
+  );
 
-    if(t.includes('cpi') || t.includes('consumer price')) return {
-      higher: { gold: 'bullish', nas: 'bearish', btc: 'neutral', reason: 'Höhere Inflation → Safe Haven Gold gefragt, aber auch Fed-Zinsangst drückt NAS' },
-      lower: { gold: 'bearish', nas: 'bullish', btc: 'bullish', reason: 'Niedrigere Inflation → Zinssenkungshoffnungen steigen → Risk-on, NAS/BTC profitieren' },
-    };
+  if(t.includes('adp') && t.includes('employment')) return pred(
+    'bearish','bullish','neutral','ADP-Beschäftigung stark → NFP-Vorläufer bullisch → hawkishe Fed-Erwartungen',
+    'bullish','bearish','neutral','ADP-Beschäftigung schwach → Arbeitsmarkt kühlt ab → dovishe Fed-Erwartungen steigen'
+  );
 
-    if(t.includes('pce')) return {
-      higher: { gold: 'bearish', nas: 'bearish', btc: 'bearish', reason: 'Feds bevorzugter Inflationsindikator steigt → Zinssenkungen rücken weiter → alle Assets unter Druck' },
-      lower: { gold: 'bullish', nas: 'bullish', btc: 'bullish', reason: 'PCE kühlt ab → Fed kann früher senken → Risk-on, Gold als Safe Haven unterstützt' },
-    };
+  if((t.includes('unemployment') && t.includes('rate')) || t.includes('arbeitslosenquote')) return pred(
+    'bullish','bearish','bearish','Steigende Arbeitslosigkeit → wirtschaftliche Schwäche → Fed unter Druck zu senken → Gold profitiert',
+    'bearish','bullish','neutral','Sinkende Arbeitslosigkeit → starker Arbeitsmarkt → Fed bleibt hawkish → Dollar stark'
+  );
 
-    if(t.includes('fomc') || t.includes('fed rate') || t.includes('interest rate decision')) return {
-      higher: { gold: 'bearish', nas: 'bearish', btc: 'bearish', reason: 'Unerwartete Zinserhöhung → Opportunitätskosten für Gold steigen, Risk-off für alle' },
-      lower: { gold: 'bullish', nas: 'bullish', btc: 'bullish', reason: 'Zinssenkung → Dollar schwächer, Gold steigt, Risk-on für NAS/BTC' },
-    };
+  if(t.includes('unemployment claims') || t.includes('jobless claims') || t.includes('initial claims')) return pred(
+    'bullish','bearish','bearish','Mehr Erstanträge → Arbeitsmarkt kühlt ab → mögliche Fed-Lockerung → Gold steigt',
+    'bearish','bullish','neutral','Weniger Erstanträge → starker Arbeitsmarkt → Fed bleibt restriktiv'
+  );
 
-    if(t.includes('gdp')) return {
-      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starkes Wachstum → Fed hat keinen Grund zu senken → Dollar stark, Gold schwächer, NAS profitiert' },
-      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwaches Wachstum → Rezessionsangst → Safe Haven Gold gesucht, Risk-off für NAS/BTC' },
-    };
+  if(t.includes('jolts') || t.includes('job openings')) return pred(
+    'bearish','bullish','neutral','Viele offene Stellen → Arbeitsmarkt angespannt → Fed bleibt hawkish',
+    'bullish','bearish','neutral','Weniger offene Stellen → Arbeitsmarkt kühlt → Lockerung möglich → Gold profitiert'
+  );
 
-    if(t.includes('retail sales')) return {
-      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starker Konsum → wirtschaftliche Stärke → Fed bleibt restriktiv → Gold unter Druck' },
-      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwacher Konsum → Konjunkturangst → Safe Haven Gold, Risk-off' },
-    };
+  if(t.includes('average hourly earnings') || t.includes('wage')) return pred(
+    'bearish','bearish','bearish','Höhere Löhne → Lohninflation → Fed muss länger restriktiv bleiben → Druck auf alle Assets',
+    'bullish','bullish','neutral','Niedrigere Lohnwachstum → Inflationsdruck lässt nach → Fed kann früher senken'
+  );
 
-    if(t.includes('unemployment claims') || t.includes('jobless')) return {
-      higher: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Mehr Arbeitslose → Wirtschaft schwächt sich ab → Fed könnte lockern, Gold profitiert' },
-      lower: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Weniger Arbeitslose → starker Arbeitsmarkt → Fed bleibt hawkish → Dollar steigt' },
-    };
+  if(t.includes('participation rate')) return pred(
+    'bearish','bullish','neutral','Mehr Menschen suchen Arbeit → Arbeitskräfteangebot steigt → Lohndruck sinkt → hawkish-Bedenken geringer',
+    'bullish','bearish','neutral','Weniger Erwerbstätige → strukturelle Schwäche im Arbeitsmarkt → Rezessionssorge'
+  );
 
-    if(t.includes('ism') || t.includes('pmi') || t.includes('manufacturing')) return {
-      higher: { gold: 'bearish', nas: 'bullish', btc: 'bullish', reason: 'Starke Wirtschaftsaktivität → Risk-on, Dollar stärker → Gold unter Druck' },
-      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwache Wirtschaftsaktivität → Rezessionssorgen → Safe Haven Gold gefragt' },
-    };
+  // ── USD — Inflation ──
+  if(t.includes('cpi') || (t.includes('consumer price') && t.includes('index'))) return pred(
+    'bullish','bearish','neutral','Höhere Inflation → Safe Haven Gold gefragt; gleichzeitig Fed-Zinsangst drückt NAS',
+    'bearish','bullish','bullish','Niedrigere Inflation → Zinssenkungshoffnungen → Risk-on, NAS/BTC profitieren'
+  );
 
-    if(t.includes('fed') && (t.includes('speak') || t.includes('chair') || t.includes('powell'))) return {
-      higher: null, lower: null,
-      text: 'Hawkishe Aussagen (Inflation, keine Senkungen) → bearish Gold, bearish NAS. Dovishe Aussagen (Konjunktursorgen, Senkungen möglich) → bullisch Gold, bullisch NAS.',
-    };
+  if(t.includes('pce')) return pred(
+    'bearish','bearish','bearish','Feds Lieblingsindikator steigt → Zinssenkungen rücken weiter weg → alle Assets unter Druck',
+    'bullish','bullish','bullish','PCE kühlt ab → Fed kann früher senken → Gold und Risk-Assets profitieren'
+  );
 
-    if(t.includes('jolts') || t.includes('job openings')) return {
-      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Viele offene Stellen → starker Arbeitsmarkt → Fed bleibt hawkish' },
-      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Weniger offene Stellen → Abkühlung → mögliche Lockerung → Gold profitiert' },
-    };
+  if(t.includes('ppi') || t.includes('producer price')) return pred(
+    'bearish','bearish','neutral','Höhere Erzeugerpreise → Inflation in der Pipeline → Fed bleibt restriktiv',
+    'bullish','bullish','neutral','Erzeugerpreise fallen → Deflationsdruck → Fed kann lockern → Gold profitiert'
+  );
 
-    if(t.includes('housing') || t.includes('home sales') || t.includes('building permits')) return {
-      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starker Immobilienmarkt → wirtschaftliche Stärke → Dollar stark' },
-      lower: { gold: 'neutral', nas: 'bearish', btc: 'bearish', reason: 'Schwacher Immobilienmarkt → Konjunktursorgen, begrenzte Auswirkung auf Gold' },
-    };
+  if(t.includes('import price') || t.includes('export price')) return pred(
+    'neutral','bearish','neutral','Steigende Importpreise → importierte Inflation → leicht bearish für Risk-Assets',
+    'neutral','bullish','neutral','Fallende Importpreise → Inflationsdruck sinkt → Risk-on-Stimmung'
+  );
 
-    if(t.includes('durable goods')) return {
-      higher: { gold: 'bearish', nas: 'bullish', btc: 'bullish', reason: 'Starke Industrieproduktion → Wirtschaft läuft → Risk-on, Dollar stark' },
-      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwache Aufträge → Industrieabkühlung → Konjunktursorgen → Gold gesucht' },
-    };
+  // ── USD — Zinsen / Fed ──
+  if(t.includes('fomc') || t.includes('fed rate') || t.includes('interest rate decision') || t.includes('fed funds')) return pred(
+    'bearish','bearish','bearish','Zinserhöhung → Opportunitätskosten für Gold steigen, Risk-off für alle Assets',
+    'bullish','bullish','bullish','Zinssenkung → Dollar schwächer, Gold steigt, Risk-on für NAS/BTC'
+  );
 
-    if(t.includes('trade balance')) return {
-      higher: { gold: 'neutral', nas: 'bullish', btc: 'neutral', reason: 'Positiver Handelssaldo → stärkere Wirtschaft, aber gemischter Effekt auf Gold' },
-      lower: { gold: 'neutral', nas: 'bearish', btc: 'bearish', reason: 'Höheres Defizit → Dollarrisiken, aber direkter Gold-Effekt begrenzt' },
-    };
-  }
+  if(t.includes('fomc') && t.includes('minute')) return speaker(
+    'Hawkishe Protokolle (Inflation noch zu hoch, keine Senkungen) → bearish Gold, bearish NAS. Dovishe Protokolle (Konjunktursorgen, Senkungen diskutiert) → bullisch Gold, bullisch NAS/BTC.'
+  );
+
+  if((t.includes('fed') || t.includes('powell') || t.includes('chair') || t.includes('waller') || t.includes('williams') || t.includes('daly') || t.includes('kashkari')) && t.includes('speak')) return speaker(
+    'Hawkishe Aussagen (Inflation, keine Senkungen bald) → bearish Gold, bearish NAS. Dovishe Aussagen (Konjunktursorgen, Lockerung möglich) → bullisch Gold, bullisch NAS/BTC.'
+  );
+
+  // ── USD — Wachstum / Konjunktur ──
+  if(t.includes('gdp')) return pred(
+    'bearish','bullish','neutral','Starkes Wachstum → Fed kein Grund zu senken → Dollar stark, Gold schwächer, NAS profitiert',
+    'bullish','bearish','bearish','Schwaches Wachstum → Rezessionsangst → Safe Haven Gold, Risk-off'
+  );
+
+  if(t.includes('retail sales')) return pred(
+    'bearish','bullish','neutral','Starker Konsum → wirtschaftliche Stärke → Fed bleibt restriktiv → Gold unter Druck',
+    'bullish','bearish','bearish','Schwacher Konsum → Konjunkturangst → Safe Haven Gold, Risk-off'
+  );
+
+  if(t.includes('consumer confidence') || t.includes('consumer sentiment') || t.includes('michigan')) return pred(
+    'bearish','bullish','bullish','Hohes Verbrauchervertrauen → Konsumerwartungen stark → Risk-on, NAS/BTC profitieren',
+    'bullish','bearish','bearish','Niedriges Verbrauchervertrauen → Konjunktursorgen → Safe Haven Gold gesucht'
+  );
+
+  if(t.includes('ism') || (t.includes('pmi') && !t.includes('ecb') && !t.includes('eur'))) return pred(
+    'bearish','bullish','bullish','Starke Wirtschaftsaktivität (>50) → Risk-on, Dollar stark → Gold unter Druck',
+    'bullish','bearish','bearish','Schrumpfende Aktivität (<50) → Rezessionssorgen → Safe Haven Gold gefragt'
+  );
+
+  if(t.includes('industrial production') || t.includes('capacity utilization')) return pred(
+    'bearish','bullish','neutral','Starke Produktion → wirtschaftliche Stärke → Risk-on, Dollar stark',
+    'bullish','bearish','bearish','Schwache Produktion → Konjunktursorgen → Gold als Safe Haven gesucht'
+  );
+
+  if(t.includes('business inventories') || t.includes('wholesale inventories')) return pred(
+    'neutral','neutral','neutral','Lagerveränderungen haben begrenzten direkten Einfluss auf Gold/NAS/BTC',
+    'neutral','neutral','neutral','Lagerveränderungen haben begrenzten direkten Einfluss auf Gold/NAS/BTC'
+  );
+
+  if(t.includes('factory orders') || t.includes('durable goods')) return pred(
+    'bearish','bullish','bullish','Starke Aufträge → Industrieproduktion anzieht → Risk-on, Dollar stark',
+    'bullish','bearish','bearish','Schwache Aufträge → Industrieabkühlung → Konjunktursorgen → Gold gesucht'
+  );
+
+  // ── USD — Immobilien ──
+  if(t.includes('existing home') || t.includes('pending home') || t.includes('new home sales')) return pred(
+    'bearish','bullish','neutral','Starker Immobilienmarkt → Wohlstandseffekt, wirtschaftliche Stärke → Dollar stark',
+    'neutral','bearish','bearish','Schwacher Immobilienmarkt → Konjunktursorgen, begrenzte Gold-Wirkung'
+  );
+
+  if(t.includes('building permits') || t.includes('housing starts')) return pred(
+    'bearish','bullish','neutral','Starkes Baugeschäft → Wirtschaft expandiert → Dollar stark → Gold unter Druck',
+    'neutral','bearish','neutral','Schwaches Baugeschäft → leichte Konjunkturdämpfung, Gold kaum direkt betroffen'
+  );
+
+  if(t.includes('case-shiller') || t.includes('house price') || t.includes('home price')) return pred(
+    'bearish','bullish','neutral','Steigende Hauspreise → Wohlstandseffekt → Konsum stark → Risk-on',
+    'neutral','bearish','neutral','Fallende Hauspreise → Wohlstandseffekt negativ → Konjunktursorgen'
+  );
+
+  // ── USD — Außenhandel / Dollar ──
+  if(t.includes('trade balance') || t.includes('current account')) return pred(
+    'neutral','bullish','neutral','Positiver Saldo → stärkere Wirtschaft, gemischter Effekt auf Gold',
+    'neutral','bearish','bearish','Höheres Defizit → Dollarrisiken langfristig, direkter Gold-Effekt begrenzt'
+  );
+
+  if(t.includes('treasury') && t.includes('auction')) return speaker(
+    'Starke Treasury-Auktion (hohe Nachfrage) → Renditen sinken tendenziell → leicht bullisch Gold. Schwache Auktion → Renditen steigen → bearish Gold.'
+  );
+
+  // ── USD — Sonstiges ──
+  if(t.includes('empire state') || t.includes('philadelphia fed') || t.includes('richmond fed') || t.includes('chicago fed')) return pred(
+    'bearish','bullish','neutral','Regionaler Fed-Index stark → Industrie wächst → Dollar stark, Gold schwächer',
+    'bullish','bearish','neutral','Regionaler Fed-Index schwach → Industrieabschwächung → Konjunktursorgen → Gold gesucht'
+  );
+
+  if(t.includes('beige book')) return speaker(
+    'Hawkisches Beige Book (starke Wirtschaft, Preisdruck) → bearish Gold, bearish NAS. Dovishes Beige Book (Abschwächung sichtbar) → bullisch Gold.'
+  );
+
+  if(t.includes('crude oil') || t.includes('oil inventories') || t.includes('eia')) return pred(
+    'neutral','neutral','neutral','Niedrigere Öl-Vorräte (Drawdown) → Ölpreis steigt → leicht inflationär → Gold neutral bis leicht bullisch',
+    'neutral','neutral','neutral','Höhere Öl-Vorräte (Build) → Ölpreis sinkt → Inflationsdruck nachlassend → Risk-on'
+  );
 
   // ── Eurozone / EZB ──
   if(country === 'EUR') {
-    if(t.includes('ecb') && (t.includes('rate') || t.includes('decision') || t.includes('speak'))) return {
-      higher: null, lower: null,
-      text: 'EZB-Zinserhöhung/hawkishe Aussagen → EUR stärker, indirekter bearisher Effekt auf Gold (weniger Dollar-Nachfrage als Safe Haven nötig). EZB-Senkung → EUR schwächer, Gold tendenziell neutral bis leicht positiv.',
-    };
+    if(t.includes('ecb') && (t.includes('rate') || t.includes('decision'))) return pred(
+      'bearish','neutral','neutral','EZB erhöht Zinsen → EUR stärker → Dollar als Safe Haven weniger gefragt → indirekter Druck auf Gold',
+      'bullish','bullish','neutral','EZB senkt Zinsen → EUR schwächer → Dollar stärker → aber Risk-on für NAS, Gold von Unsicherheit gestützt'
+    );
 
-    if(t.includes('cpi') || t.includes('inflation')) return {
-      higher: { gold: 'neutral', nas: 'bearish', btc: 'neutral', reason: 'Hohe EU-Inflation → EZB bleibt restriktiv → EUR stark, begrenzte Gold-Wirkung' },
-      lower: { gold: 'neutral', nas: 'bullish', btc: 'bullish', reason: 'Niedrige EU-Inflation → EZB kann senken → Risk-on-Stimmung' },
-    };
+    if(t.includes('ecb') && t.includes('speak')) return speaker(
+      'Hawkische EZB-Aussagen → EUR stärker, indirekter Druck auf Gold. Dovishe Aussagen → EUR schwächer, Risk-on für NAS/BTC.'
+    );
+
+    if(t.includes('cpi') || t.includes('hicp') || t.includes('inflation')) return pred(
+      'neutral','bearish','neutral','Hohe EU-Inflation → EZB bleibt restriktiv → EUR stark, begrenzte direkte Gold-Wirkung',
+      'neutral','bullish','bullish','Niedrige EU-Inflation → EZB kann früher senken → Risk-on-Stimmung'
+    );
+
+    if(t.includes('gdp') || t.includes('growth')) return pred(
+      'neutral','bullish','neutral','Starkes EU-Wachstum → Risk-on in Europa, EUR stärker → Dollar leicht schwächer → Gold neutral',
+      'bullish','bearish','bearish','Schwaches EU-Wachstum → globale Rezessionssorgen → Safe Haven Gold gefragt'
+    );
+
+    if(t.includes('pmi') || t.includes('manufacturing') || t.includes('services')) return pred(
+      'neutral','bullish','neutral','Starke EU-Wirtschaftsaktivität → Risk-on-Stimmung weltweit',
+      'bullish','bearish','bearish','Schwache EU-Aktivität → globale Sorgen → Safe Haven Gold gesucht'
+    );
+
+    if(t.includes('unemployment') || t.includes('employment')) return pred(
+      'neutral','bearish','neutral','Steigende EU-Arbeitslosigkeit → wirtschaftliche Schwäche → globale Rezessionssorgen → Gold leicht gestützt',
+      'neutral','bullish','neutral','Sinkende EU-Arbeitslosigkeit → EUR-Wirtschaft robust → Risk-on'
+    );
   }
 
-  // Kein spezifisches Match — kein Prediction
+  // ── Vereinigtes Königreich / BoE ──
+  if(country === 'GBP') {
+    if(t.includes('boe') || (t.includes('bank of england') && t.includes('rate'))) return pred(
+      'neutral','neutral','neutral','BoE erhöht Zinsen → GBP stärker, begrenzte direkte Gold/NAS-Wirkung',
+      'neutral','neutral','neutral','BoE senkt Zinsen → GBP schwächer, indirekte Risk-on-Stimmung'
+    );
+
+    if(t.includes('cpi') || t.includes('inflation')) return pred(
+      'neutral','bearish','neutral','Hohe UK-Inflation → BoE bleibt hawkish, begrenzte Gold-Wirkung',
+      'neutral','bullish','neutral','Niedrige UK-Inflation → BoE kann senken → leichte Risk-on-Stimmung'
+    );
+
+    if(t.includes('gdp')) return pred(
+      'neutral','bullish','neutral','Starkes UK-Wachstum → Risk-on weltweit → Gold neutral',
+      'bullish','bearish','bearish','Schwaches UK-Wachstum → globale Rezessionssorgen → Gold als Safe Haven'
+    );
+  }
+
+  // ── Japan / BoJ ──
+  if(country === 'JPY') {
+    if(t.includes('boj') || t.includes('bank of japan') || (t.includes('interest rate') && t.includes('japan'))) return speaker(
+      'BoJ erhöht Zinsen unerwartet → JPY stark → Carry-Trade-Auflösung → Risk-off, Gold volatil, NAS unter Druck. BoJ hält → JPY schwach → Carry-Trade stabil → Risk-on.'
+    );
+
+    if(t.includes('cpi') || t.includes('inflation')) return pred(
+      'neutral','neutral','neutral','Japanische Inflation steigt → BoJ-Zinserhöhungsdruck → JPY-Volatilität, indirekter Risk-off',
+      'neutral','bullish','neutral','Japanische Inflation kühlt → BoJ bleibt locker → JPY schwach → Risk-on global'
+    );
+  }
+
+  // ── China ──
+  if(country === 'CNY' || country === 'CNH') {
+    if(t.includes('gdp')) return pred(
+      'bullish','bullish','bullish','Starkes China-Wachstum → globale Rohstoffnachfrage steigt → Gold industriell + Risk-on für NAS/BTC',
+      'bullish','bearish','bearish','Schwaches China-Wachstum → globale Konjunktursorgen → Safe Haven Gold, Risk-off'
+    );
+
+    if(t.includes('pmi') || t.includes('manufacturing') || t.includes('caixin')) return pred(
+      'bullish','bullish','bullish','Starke chinesische Industrie → globale Rohstoffnachfrage → Gold + Risk-on',
+      'bearish','bearish','bearish','Schwache chinesische Industrie → globale Sorgen → Risk-off, aber Gold als Safe Haven gestützt'
+    );
+  }
+
+  // Kein spezifisches Match
   return null;
 }
 
@@ -230,6 +378,24 @@ const TRUMP_RELEVANT_KEYWORDS = [
   'oil', 'gold', 'dollar', 'inflation', 'tax', 'deal',
 ];
 
+// Kürzt Geopolitik-Headlines auf das Wesentliche für die kompakte Header-Box.
+// Entfernt typische Agentur-Präfixe, lange Nachsätze und unwichtige Details.
+function shortenHeadline(title) {
+  let s = title
+    .replace(/^(BREAKING|FLASH|UPDATE|ALERT|EXCLUSIVE|REPORT|DEVELOPING)[:\s-]*/i, '')
+    .replace(/^(Reuters|AP|Bloomberg|BBC|CNN|FT|WSJ|NYT|Guardian)[:\s-]*/i, '')
+    .replace(/^FinancialJuice:\s*/i, '')
+    .replace(/\s*[-–|]\s*(Reuters|AP|Bloomberg|BBC|CNN|FT|WSJ|NYT|Guardian)$/i, '')
+    .replace(/\s*\([^)]{0,40}\)$/, '') // entfernt kurze Klammer-Nachsätze am Ende
+    .trim();
+
+  // Auf max 80 Zeichen kürzen, am letzten Wort abschneiden
+  if(s.length > 80) {
+    s = s.slice(0, 77).replace(/\s+\S*$/, '') + '…';
+  }
+  return s;
+}
+
 function extractRssItems(xml) {
   const items = [];
   const itemBlocks = xml.split('<item>').slice(1);
@@ -242,8 +408,10 @@ function extractRssItems(xml) {
     const sourceMatch = block.match(/<source[^>]*>(.*?)<\/source>/s);
 
     if (titleMatch) {
+      const fullTitle = titleMatch[1].trim().replace(/^FinancialJuice:\s*/, '');
       items.push({
-        title: titleMatch[1].trim().replace(/^FinancialJuice:\s*/, ''),
+        title: fullTitle,
+        shortTitle: shortenHeadline(fullTitle), // kompakte Version für Header
         link: linkMatch ? linkMatch[1].trim() : '',
         pubDate: pubDateMatch ? pubDateMatch[1].trim() : '',
         description: descMatch ? descMatch[1].trim().replace(/<[^>]+>/g, '').slice(0, 200) : '',
