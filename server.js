@@ -53,18 +53,37 @@ app.get('/calendar/today', async (req, res) => {
 
     const raw = await response.json();
 
+    // Forex Factory liefert Zeiten in US/Eastern (ET).
+    // Wir wandeln in Europe/Berlin um, was der Nutzer sieht.
+    // Railway läuft auf UTC — deshalb explizite Timezone-Angabe nötig.
+
     const today = new Date();
-    const todayStr = today.toISOString().split('T')[0];
+    const todayStrBerlin = today.toLocaleDateString('de-DE', {
+      timeZone: 'Europe/Berlin',
+      year: 'numeric', month: '2-digit', day: '2-digit'
+    }).split('.').reverse().join('-'); // → "YYYY-MM-DD"
 
     const todaysEvents = raw.filter(item => {
-      return item.date && item.date.startsWith(todayStr);
+      if(!item.date) return false;
+      // Forex Factory dates are in ISO format with ET offset
+      const evtDate = new Date(item.date);
+      const evtDateBerlin = evtDate.toLocaleDateString('de-DE', {
+        timeZone: 'Europe/Berlin',
+        year: 'numeric', month: '2-digit', day: '2-digit'
+      }).split('.').reverse().join('-');
+      return evtDateBerlin === todayStrBerlin;
     });
 
     const processed = todaysEvents.map((item, idx) => {
       const time = new Date(item.date);
+      const prediction = buildPrediction(item.title, item.country);
       return {
         id: `${item.title}-${item.date}-${idx}`.replace(/\s+/g, '-'),
-        time: time.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' }),
+        // Korrekte Berliner Zeit (berücksichtigt Sommer-/Winterzeit automatisch)
+        time: time.toLocaleTimeString('de-DE', {
+          hour: '2-digit', minute: '2-digit',
+          timeZone: 'Europe/Berlin'
+        }),
         timestamp: Math.floor(time.getTime() / 1000),
         title: item.title,
         country: item.country,
@@ -73,6 +92,7 @@ app.get('/calendar/today', async (req, res) => {
         forecast: item.forecast || null,
         previous: item.previous || null,
         assets: assetsForCountry(item.country),
+        prediction,
       };
     });
 
@@ -84,6 +104,101 @@ app.get('/calendar/today', async (req, res) => {
     res.status(500).json({ error: 'Konnte Kalenderdaten nicht laden', details: err.message });
   }
 });
+
+// ============ PREDICTION-REGELN PRO INDIKATOR ============
+// Basierend auf historisch beobachteten Marktreaktionen:
+// "Actual > Forecast" oder "Actual < Forecast" → typische Kursreaktion
+// Quelle: dokumentierte Korrelationen aus Forex Factory / CBOE Research.
+// WICHTIG: Historische Muster, keine Garantie.
+
+function buildPrediction(title, country) {
+  const t = title.toLowerCase();
+
+  // ── US-Daten (beeinflussen Gold, NAS100, BTC am stärksten) ──
+  if(country === 'USD') {
+
+    if(t.includes('non-farm') || t.includes('nfp') || t.includes('employment change')) return {
+      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starker Arbeitsmarkt → Fed bleibt hawkish → Dollar steigt, Gold unter Druck' },
+      lower: { gold: 'bullish', nas: 'bearish', btc: 'neutral', reason: 'Schwacher Arbeitsmarkt → Fed könnte lockern → Dollar schwächer, Gold profitiert' },
+    };
+
+    if(t.includes('cpi') || t.includes('consumer price')) return {
+      higher: { gold: 'bullish', nas: 'bearish', btc: 'neutral', reason: 'Höhere Inflation → Safe Haven Gold gefragt, aber auch Fed-Zinsangst drückt NAS' },
+      lower: { gold: 'bearish', nas: 'bullish', btc: 'bullish', reason: 'Niedrigere Inflation → Zinssenkungshoffnungen steigen → Risk-on, NAS/BTC profitieren' },
+    };
+
+    if(t.includes('pce')) return {
+      higher: { gold: 'bearish', nas: 'bearish', btc: 'bearish', reason: 'Feds bevorzugter Inflationsindikator steigt → Zinssenkungen rücken weiter → alle Assets unter Druck' },
+      lower: { gold: 'bullish', nas: 'bullish', btc: 'bullish', reason: 'PCE kühlt ab → Fed kann früher senken → Risk-on, Gold als Safe Haven unterstützt' },
+    };
+
+    if(t.includes('fomc') || t.includes('fed rate') || t.includes('interest rate decision')) return {
+      higher: { gold: 'bearish', nas: 'bearish', btc: 'bearish', reason: 'Unerwartete Zinserhöhung → Opportunitätskosten für Gold steigen, Risk-off für alle' },
+      lower: { gold: 'bullish', nas: 'bullish', btc: 'bullish', reason: 'Zinssenkung → Dollar schwächer, Gold steigt, Risk-on für NAS/BTC' },
+    };
+
+    if(t.includes('gdp')) return {
+      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starkes Wachstum → Fed hat keinen Grund zu senken → Dollar stark, Gold schwächer, NAS profitiert' },
+      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwaches Wachstum → Rezessionsangst → Safe Haven Gold gesucht, Risk-off für NAS/BTC' },
+    };
+
+    if(t.includes('retail sales')) return {
+      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starker Konsum → wirtschaftliche Stärke → Fed bleibt restriktiv → Gold unter Druck' },
+      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwacher Konsum → Konjunkturangst → Safe Haven Gold, Risk-off' },
+    };
+
+    if(t.includes('unemployment claims') || t.includes('jobless')) return {
+      higher: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Mehr Arbeitslose → Wirtschaft schwächt sich ab → Fed könnte lockern, Gold profitiert' },
+      lower: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Weniger Arbeitslose → starker Arbeitsmarkt → Fed bleibt hawkish → Dollar steigt' },
+    };
+
+    if(t.includes('ism') || t.includes('pmi') || t.includes('manufacturing')) return {
+      higher: { gold: 'bearish', nas: 'bullish', btc: 'bullish', reason: 'Starke Wirtschaftsaktivität → Risk-on, Dollar stärker → Gold unter Druck' },
+      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwache Wirtschaftsaktivität → Rezessionssorgen → Safe Haven Gold gefragt' },
+    };
+
+    if(t.includes('fed') && (t.includes('speak') || t.includes('chair') || t.includes('powell'))) return {
+      higher: null, lower: null,
+      text: 'Hawkishe Aussagen (Inflation, keine Senkungen) → bearish Gold, bearish NAS. Dovishe Aussagen (Konjunktursorgen, Senkungen möglich) → bullisch Gold, bullisch NAS.',
+    };
+
+    if(t.includes('jolts') || t.includes('job openings')) return {
+      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Viele offene Stellen → starker Arbeitsmarkt → Fed bleibt hawkish' },
+      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Weniger offene Stellen → Abkühlung → mögliche Lockerung → Gold profitiert' },
+    };
+
+    if(t.includes('housing') || t.includes('home sales') || t.includes('building permits')) return {
+      higher: { gold: 'bearish', nas: 'bullish', btc: 'neutral', reason: 'Starker Immobilienmarkt → wirtschaftliche Stärke → Dollar stark' },
+      lower: { gold: 'neutral', nas: 'bearish', btc: 'bearish', reason: 'Schwacher Immobilienmarkt → Konjunktursorgen, begrenzte Auswirkung auf Gold' },
+    };
+
+    if(t.includes('durable goods')) return {
+      higher: { gold: 'bearish', nas: 'bullish', btc: 'bullish', reason: 'Starke Industrieproduktion → Wirtschaft läuft → Risk-on, Dollar stark' },
+      lower: { gold: 'bullish', nas: 'bearish', btc: 'bearish', reason: 'Schwache Aufträge → Industrieabkühlung → Konjunktursorgen → Gold gesucht' },
+    };
+
+    if(t.includes('trade balance')) return {
+      higher: { gold: 'neutral', nas: 'bullish', btc: 'neutral', reason: 'Positiver Handelssaldo → stärkere Wirtschaft, aber gemischter Effekt auf Gold' },
+      lower: { gold: 'neutral', nas: 'bearish', btc: 'bearish', reason: 'Höheres Defizit → Dollarrisiken, aber direkter Gold-Effekt begrenzt' },
+    };
+  }
+
+  // ── Eurozone / EZB ──
+  if(country === 'EUR') {
+    if(t.includes('ecb') && (t.includes('rate') || t.includes('decision') || t.includes('speak'))) return {
+      higher: null, lower: null,
+      text: 'EZB-Zinserhöhung/hawkishe Aussagen → EUR stärker, indirekter bearisher Effekt auf Gold (weniger Dollar-Nachfrage als Safe Haven nötig). EZB-Senkung → EUR schwächer, Gold tendenziell neutral bis leicht positiv.',
+    };
+
+    if(t.includes('cpi') || t.includes('inflation')) return {
+      higher: { gold: 'neutral', nas: 'bearish', btc: 'neutral', reason: 'Hohe EU-Inflation → EZB bleibt restriktiv → EUR stark, begrenzte Gold-Wirkung' },
+      lower: { gold: 'neutral', nas: 'bullish', btc: 'bullish', reason: 'Niedrige EU-Inflation → EZB kann senken → Risk-on-Stimmung' },
+    };
+  }
+
+  // Kein spezifisches Match — kein Prediction
+  return null;
+}
 
 // ============ GEOPOLITIK / MARKT-NEWS FEED ============
 // Drei kombinierte, komplett kostenlose Quellen ohne API-Key:
