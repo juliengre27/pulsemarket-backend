@@ -1329,3 +1329,218 @@ app.get('/gold/observation', async (req, res) => {
     res.status(500).json({ error: 'Konnte Beobachtung nicht berechnen', details: err.message });
   }
 });
+  // ============================================================================
+//  /bias/daily — Täglicher Macro/Intermarket/Sentiment-Bias
+//  XAUUSD · EURUSD · NAS100 · BTCUSD
+//  Quellen: FRED (Yields/VIX) · Binance (BTC) · alternative.me (Crypto F&G)
+//           Finnhub (QQQ, EURUSD) · CNN (Aktien F&G — nutzt deine bestehende Logik)
+//  Stil an deine server.js angepasst: direkte app.get-Route, Promise.allSettled,
+//  jede Quelle darf ausfallen -> Faktor neutral, confidence sinkt.
+// ============================================================================
+
+const FRED_API_KEY = process.env.FRED_API_KEY || '';
+const FINNHUB_API_KEY_BIAS = process.env.FINNHUB_API_KEY || '';
+
+let biasCache = { data: null, lastFetch: 0 };
+const BIAS_CACHE_DURATION_MS = 15 * 60 * 1000; // 15 Minuten
+
+async function biasFetchJSON(url, opts = {}) {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// FRED: neueste Werte einer Serie (desc), liefert latest/prev/week
+async function biasFred(seriesId) {
+  if (!FRED_API_KEY) throw new Error('FRED_API_KEY fehlt');
+  const url = `https://api.stlouisfed.org/fred/series/observations?series_id=${seriesId}&api_key=${FRED_API_KEY}&file_type=json&sort_order=desc&limit=12`;
+  const j = await biasFetchJSON(url);
+  const vals = (j.observations || []).map(o => parseFloat(o.value)).filter(v => !isNaN(v));
+  if (!vals.length) throw new Error('keine Werte');
+  return { latest: vals[0], prev: vals[1] ?? vals[0], week: vals[4] ?? vals[vals.length - 1] };
+}
+
+async function biasCryptoFng() {
+  const j = await biasFetchJSON('https://api.alternative.me/fng/?limit=1');
+  const d = j?.data?.[0];
+  if (!d) throw new Error('leer');
+  return { value: parseInt(d.value, 10), label: d.value_classification };
+}
+
+async function biasStocksFng() {
+  const j = await biasFetchJSON('https://production.dataviz.cnn.io/index/fearandgreed/graphdata', {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36', 'Accept': 'application/json' }
+  });
+  const v = j?.fear_and_greed?.score;
+  if (v == null) throw new Error('leer');
+  return { value: Math.round(v), label: j?.fear_and_greed?.rating || '' };
+}
+
+async function biasBtcTicker() {
+  return biasFetchJSON('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+}
+async function biasBtcTrend200() {
+  const k = await biasFetchJSON('https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=210');
+  const closes = k.map(r => parseFloat(r[4]));
+  const last = closes[closes.length - 1];
+  const ma200 = closes.slice(-200).reduce((a, b) => a + b, 0) / Math.min(200, closes.length);
+  return { last, ma200, above: last > ma200 };
+}
+async function biasBtcFunding() {
+  const j = await biasFetchJSON('https://fapi.binance.com/fapi/v1/premiumIndex?symbol=BTCUSDT');
+  return { rate: parseFloat(j.lastFundingRate) };
+}
+async function biasFinnhubQuote(symbol) {
+  if (!FINNHUB_API_KEY_BIAS) throw new Error('FINNHUB_API_KEY fehlt');
+  const j = await biasFetchJSON(`https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${FINNHUB_API_KEY_BIAS}`);
+  if (!j || !j.c) throw new Error('leer');
+  return { price: j.c, prevClose: j.pc, chgPct: j.pc ? (100 * (j.c - j.pc)) / j.pc : 0 };
+}
+
+async function biasSafeFactor(name, fn) {
+  try { const r = await fn(); return { name, ok: true, ...r }; }
+  catch (e) { return { name, ok: false, value: null, points: 0, note: `Quelle nicht verfügbar (${e.message}) — neutral gewertet` }; }
+}
+const biasClamp = (x, a, b) => Math.max(a, Math.min(b, x));
+
+function biasBuild(instrument, factors) {
+  const score = factors.reduce((s, f) => s + (f.points || 0), 0);
+  const okCount = factors.filter(f => f.ok).length;
+  const confidence = +(okCount / factors.length).toFixed(2);
+  const bias = score >= 2 ? 'LONG' : score <= -2 ? 'SHORT' : 'NEUTRAL';
+  const arrow = bias === 'LONG' ? '▲' : bias === 'SHORT' ? '▼' : '·';
+  const comment = bias === 'LONG'
+    ? `Makro-Beobachtung: Umfeld spricht aktuell eher für die Long-Seite (Score +${score}).`
+    : bias === 'SHORT'
+    ? `Makro-Beobachtung: Umfeld spricht aktuell eher für die Short-Seite (Score ${score}).`
+    : `Makro-Beobachtung: kein klares Übergewicht (Score ${score >= 0 ? '+' : ''}${score}) — Tagesstruktur entscheidet.`;
+  return { instrument, bias, arrow, score, confidence, factors, comment };
+}
+
+async function biasScoreGold() {
+  const f = await Promise.all([
+    biasSafeFactor('US-Realzins 10Y (Δ Woche)', async () => {
+      const r = await biasFred('DFII10'); const d = r.latest - r.week;
+      const points = d <= -0.10 ? 2 : d <= -0.03 ? 1 : d >= 0.10 ? -2 : d >= 0.03 ? -1 : 0;
+      return { value: `${r.latest.toFixed(2)}% (${d >= 0 ? '+' : ''}${d.toFixed(2)})`, points, note: points > 0 ? 'Fallende Realzinsen stützen Gold' : points < 0 ? 'Steigende Realzinsen belasten Gold' : 'Realzinsen seitwärts' };
+    }),
+    biasSafeFactor('DXY-Proxy (EURUSD-Momentum)', async () => {
+      const q = await biasFinnhubQuote('OANDA:EUR_USD');
+      const points = q.chgPct >= 0.3 ? 1 : q.chgPct <= -0.3 ? -1 : 0;
+      return { value: `EURUSD ${q.price?.toFixed(4)} (${q.chgPct >= 0 ? '+' : ''}${q.chgPct.toFixed(2)}%)`, points, note: points > 0 ? 'Schwächerer Dollar = Rückenwind Gold' : points < 0 ? 'Stärkerer Dollar = Gegenwind' : 'Dollar neutral' };
+    }),
+    biasSafeFactor('VIX-Level', async () => {
+      const r = await biasFred('VIXCLS');
+      const points = r.latest >= 25 ? 1 : r.latest <= 14 ? -1 : 0;
+      return { value: r.latest.toFixed(1), points, note: points > 0 ? 'Erhöhte Nervosität — Safe-Haven möglich' : points < 0 ? 'Sehr ruhig — wenig Absicherung' : 'VIX normal' };
+    }),
+    biasSafeFactor('Aktien Fear & Greed', async () => {
+      const r = await biasStocksFng();
+      const points = r.value <= 30 ? 1 : r.value >= 75 ? -1 : 0;
+      return { value: `${r.value} (${r.label})`, points, note: points > 0 ? 'Risk-off begünstigt Gold' : points < 0 ? 'Starke Risikofreude — Gold weniger gefragt' : 'Sentiment neutral' };
+    })
+  ]);
+  return biasBuild('XAUUSD', f);
+}
+
+async function biasScoreEurusd() {
+  const f = await Promise.all([
+    biasSafeFactor('US 10Y nominal (Δ Woche)', async () => {
+      const r = await biasFred('DGS10'); const d = r.latest - r.week;
+      const points = d <= -0.10 ? 1 : d >= 0.10 ? -1 : 0;
+      return { value: `${r.latest.toFixed(2)}% (${d >= 0 ? '+' : ''}${d.toFixed(2)})`, points, note: points > 0 ? 'Fallende US-Renditen schwächen Dollar' : points < 0 ? 'Steigende US-Renditen stützen Dollar' : 'seitwärts' };
+    }),
+    biasSafeFactor('EURUSD-Momentum (Tag)', async () => {
+      const q = await biasFinnhubQuote('OANDA:EUR_USD');
+      const points = biasClamp(Math.round(q.chgPct / 0.25), -2, 2);
+      return { value: `${q.price?.toFixed(4)} (${q.chgPct >= 0 ? '+' : ''}${q.chgPct.toFixed(2)}%)`, points, note: 'Kurzfrist-Momentum' };
+    }),
+    biasSafeFactor('Risk-Sentiment (Aktien F&G)', async () => {
+      const r = await biasStocksFng();
+      const points = r.value >= 60 ? 1 : r.value <= 30 ? -1 : 0;
+      return { value: `${r.value}`, points, note: points > 0 ? 'Risk-on stützt EUR leicht' : points < 0 ? 'Risk-off — Dollar gesucht' : 'neutral' };
+    })
+  ]);
+  return biasBuild('EURUSD', f);
+}
+
+async function biasScoreNas() {
+  const f = await Promise.all([
+    biasSafeFactor('US 10Y (Δ Woche)', async () => {
+      const r = await biasFred('DGS10'); const d = r.latest - r.week;
+      const points = d <= -0.10 ? 2 : d <= -0.03 ? 1 : d >= 0.10 ? -2 : d >= 0.03 ? -1 : 0;
+      return { value: `${r.latest.toFixed(2)}% (${d >= 0 ? '+' : ''}${d.toFixed(2)})`, points, note: points > 0 ? 'Fallende Renditen entlasten Tech' : points < 0 ? 'Steigende Renditen drücken Growth' : 'seitwärts' };
+    }),
+    biasSafeFactor('VIX-Zone', async () => {
+      const r = await biasFred('VIXCLS');
+      const points = r.latest <= 16 ? 1 : r.latest >= 25 ? -2 : r.latest >= 20 ? -1 : 0;
+      return { value: r.latest.toFixed(1), points, note: points > 0 ? 'Ruhig — trendfreundlich' : points < 0 ? 'Erhöhte Vola — Vorsicht Index-Longs' : 'normal' };
+    }),
+    biasSafeFactor('Aktien Fear & Greed', async () => {
+      const r = await biasStocksFng();
+      const points = r.value >= 60 ? 1 : r.value <= 25 ? 1 : r.value <= 40 ? -1 : 0;
+      return { value: `${r.value} (${r.label})`, points, note: 'extreme Angst leicht kontrarisch' };
+    }),
+    biasSafeFactor('QQQ-Momentum (Tag)', async () => {
+      const q = await biasFinnhubQuote('QQQ');
+      const points = q.chgPct >= 0.8 ? 1 : q.chgPct <= -0.8 ? -1 : 0;
+      return { value: `${q.price?.toFixed(2)} (${q.chgPct >= 0 ? '+' : ''}${q.chgPct.toFixed(2)}%)`, points, note: 'NAS100-Proxy QQQ' };
+    })
+  ]);
+  return biasBuild('NAS100', f);
+}
+
+async function biasScoreBtc() {
+  const f = await Promise.all([
+    biasSafeFactor('Crypto Fear & Greed', async () => {
+      const r = await biasCryptoFng();
+      const points = r.value <= 20 ? 2 : r.value <= 35 ? 1 : r.value >= 85 ? -2 : r.value >= 70 ? -1 : 0;
+      return { value: `${r.value} (${r.label})`, points, note: 'Extreme kontrarisch' };
+    }),
+    biasSafeFactor('Funding Rate (Binance Perp)', async () => {
+      const r = await biasBtcFunding(); const pct = r.rate * 100;
+      const points = pct >= 0.05 ? -1 : pct <= -0.01 ? 1 : 0;
+      return { value: `${pct.toFixed(3)}%`, points, note: points < 0 ? 'Longs zahlen — überhitzt' : points > 0 ? 'Shorts gedrängt' : 'unauffällig' };
+    }),
+    biasSafeFactor('200-Tage-Trend', async () => {
+      const r = await biasBtcTrend200();
+      return { value: `${Math.round(r.last)} vs MA200 ${Math.round(r.ma200)}`, points: r.above ? 1 : -1, note: r.above ? 'Über MA200 — Aufwärtstrend' : 'Unter MA200 — Abwärtstrend' };
+    }),
+    biasSafeFactor('24h-Momentum', async () => {
+      const t = await biasBtcTicker(); const chg = parseFloat(t.priceChangePercent);
+      const points = chg >= 2 ? 1 : chg <= -2 ? -1 : 0;
+      return { value: `${chg >= 0 ? '+' : ''}${chg.toFixed(1)}%`, points, note: 'Kurzfrist-Momentum' };
+    }),
+    biasSafeFactor('Risk-On-Kopplung (QQQ)', async () => {
+      const q = await biasFinnhubQuote('QQQ');
+      const points = q.chgPct >= 0.8 ? 1 : q.chgPct <= -0.8 ? -1 : 0;
+      return { value: `QQQ ${q.chgPct >= 0 ? '+' : ''}${q.chgPct.toFixed(2)}%`, points, note: 'BTC koppelt an Tech-Risk' };
+    })
+  ]);
+  return biasBuild('BTCUSD', f);
+}
+
+app.get('/bias/daily', async (req, res) => {
+  try {
+    const now = Date.now();
+    const wanted = (req.query.instrument || '').toUpperCase();
+    if (!wanted && biasCache.data && now - biasCache.lastFetch < BIAS_CACHE_DURATION_MS) {
+      return res.json({ source: 'cache', ...biasCache.data });
+    }
+    const jobs = { XAUUSD: biasScoreGold, EURUSD: biasScoreEurusd, NAS100: biasScoreNas, BTCUSD: biasScoreBtc };
+    const keys = wanted && jobs[wanted] ? [wanted] : Object.keys(jobs);
+    const results = await Promise.all(keys.map(k => jobs[k]()));
+    const out = {};
+    results.forEach(r => (out[r.instrument] = r));
+    const payload = {
+      asOf: new Date().toISOString(),
+      disclaimer: 'Markt-Beobachtungen auf Basis öffentlicher Daten — keine Anlageberatung, keine Handelsempfehlung.',
+      instruments: out
+    };
+    if (!wanted) biasCache = { data: payload, lastFetch: now };
+    res.json({ source: 'live', ...payload });
+  } catch (err) {
+    console.error('Fehler bei /bias/daily:', err.message);
+    res.status(500).json({ error: 'bias_failed', details: err.message });
+  }
+});
