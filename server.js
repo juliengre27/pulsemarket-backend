@@ -1329,7 +1329,8 @@ app.get('/gold/observation', async (req, res) => {
     res.status(500).json({ error: 'Konnte Beobachtung nicht berechnen', details: err.message });
   }
 });
-  // ============================================================================
+ 
+// ============================================================================
 //  /bias/daily — Täglicher Macro/Intermarket/Sentiment-Bias
 //  XAUUSD · EURUSD · NAS100 · BTCUSD
 //  Quellen: FRED (Yields/VIX) · Binance (BTC) · alternative.me (Crypto F&G)
@@ -1397,6 +1398,32 @@ async function biasFinnhubQuote(symbol) {
   return { price: j.c, prevClose: j.pc, chgPct: j.pc ? (100 * (j.c - j.pc)) / j.pc : 0 };
 }
 
+// Yahoo-Quote (kein Key, keine Geo-Sperre) — für EURUSD & BTC, da Finnhub-Forex 403 / Binance 451
+async function biasYahooQuote(ticker) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=5d`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' } });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  const closes = (data.chart?.result?.[0]?.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+  if (closes.length < 2) throw new Error('zu wenig Daten');
+  const price = closes[closes.length - 1], prev = closes[closes.length - 2];
+  return { price, prevClose: prev, chgPct: (100 * (price - prev)) / prev };
+}
+// BTC 200-Tage-Trend über Yahoo
+async function biasYahooBtcTrend() {
+  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD?interval=1d&range=1y';
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' } });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  const data = await r.json();
+  const closes = (data.chart?.result?.[0]?.indicators?.quote?.[0]?.close || []).filter(v => v != null);
+  if (closes.length < 50) throw new Error('zu wenig Daten');
+  const last = closes[closes.length - 1];
+  const slice = closes.slice(-200);
+  const ma = slice.reduce((a, b) => a + b, 0) / slice.length;
+  const prev = closes[closes.length - 2];
+  return { last, ma200: ma, above: last > ma, chg24: (100 * (last - prev)) / prev };
+}
+
 async function biasSafeFactor(name, fn) {
   try { const r = await fn(); return { name, ok: true, ...r }; }
   catch (e) { return { name, ok: false, value: null, points: 0, note: `Quelle nicht verfügbar (${e.message}) — neutral gewertet` }; }
@@ -1425,7 +1452,7 @@ async function biasScoreGold() {
       return { value: `${r.latest.toFixed(2)}% (${d >= 0 ? '+' : ''}${d.toFixed(2)})`, points, note: points > 0 ? 'Fallende Realzinsen stützen Gold' : points < 0 ? 'Steigende Realzinsen belasten Gold' : 'Realzinsen seitwärts' };
     }),
     biasSafeFactor('DXY-Proxy (EURUSD-Momentum)', async () => {
-      const q = await biasFinnhubQuote('OANDA:EUR_USD');
+      const q = await biasYahooQuote('EURUSD=X');
       const points = q.chgPct >= 0.3 ? 1 : q.chgPct <= -0.3 ? -1 : 0;
       return { value: `EURUSD ${q.price?.toFixed(4)} (${q.chgPct >= 0 ? '+' : ''}${q.chgPct.toFixed(2)}%)`, points, note: points > 0 ? 'Schwächerer Dollar = Rückenwind Gold' : points < 0 ? 'Stärkerer Dollar = Gegenwind' : 'Dollar neutral' };
     }),
@@ -1451,7 +1478,7 @@ async function biasScoreEurusd() {
       return { value: `${r.latest.toFixed(2)}% (${d >= 0 ? '+' : ''}${d.toFixed(2)})`, points, note: points > 0 ? 'Fallende US-Renditen schwächen Dollar' : points < 0 ? 'Steigende US-Renditen stützen Dollar' : 'seitwärts' };
     }),
     biasSafeFactor('EURUSD-Momentum (Tag)', async () => {
-      const q = await biasFinnhubQuote('OANDA:EUR_USD');
+      const q = await biasYahooQuote('EURUSD=X');
       const points = biasClamp(Math.round(q.chgPct / 0.25), -2, 2);
       return { value: `${q.price?.toFixed(4)} (${q.chgPct >= 0 ? '+' : ''}${q.chgPct.toFixed(2)}%)`, points, note: 'Kurzfrist-Momentum' };
     }),
@@ -1491,26 +1518,24 @@ async function biasScoreNas() {
 }
 
 async function biasScoreBtc() {
+  // BTC-Trend + 24h einmal über Yahoo holen (Binance 451-gesperrt auf Railway)
+  const trend = await biasSafeFactor('__trend', biasYahooBtcTrend);
   const f = await Promise.all([
     biasSafeFactor('Crypto Fear & Greed', async () => {
       const r = await biasCryptoFng();
       const points = r.value <= 20 ? 2 : r.value <= 35 ? 1 : r.value >= 85 ? -2 : r.value >= 70 ? -1 : 0;
       return { value: `${r.value} (${r.label})`, points, note: 'Extreme kontrarisch' };
     }),
-    biasSafeFactor('Funding Rate (Binance Perp)', async () => {
-      const r = await biasBtcFunding(); const pct = r.rate * 100;
-      const points = pct >= 0.05 ? -1 : pct <= -0.01 ? 1 : 0;
-      return { value: `${pct.toFixed(3)}%`, points, note: points < 0 ? 'Longs zahlen — überhitzt' : points > 0 ? 'Shorts gedrängt' : 'unauffällig' };
-    }),
-    biasSafeFactor('200-Tage-Trend', async () => {
-      const r = await biasBtcTrend200();
-      return { value: `${Math.round(r.last)} vs MA200 ${Math.round(r.ma200)}`, points: r.above ? 1 : -1, note: r.above ? 'Über MA200 — Aufwärtstrend' : 'Unter MA200 — Abwärtstrend' };
-    }),
-    biasSafeFactor('24h-Momentum', async () => {
-      const t = await biasBtcTicker(); const chg = parseFloat(t.priceChangePercent);
+    (async () => {
+      if (!trend.ok) return { name: '200-Tage-Trend', ok: false, value: null, points: 0, note: trend.note };
+      return { name: '200-Tage-Trend', ok: true, value: `${Math.round(trend.last)} vs MA200 ${Math.round(trend.ma200)}`, points: trend.above ? 1 : -1, note: trend.above ? 'Über MA200 — Aufwärtstrend' : 'Unter MA200 — Abwärtstrend' };
+    })(),
+    (async () => {
+      if (!trend.ok) return { name: '24h-Momentum', ok: false, value: null, points: 0, note: trend.note };
+      const chg = trend.chg24;
       const points = chg >= 2 ? 1 : chg <= -2 ? -1 : 0;
-      return { value: `${chg >= 0 ? '+' : ''}${chg.toFixed(1)}%`, points, note: 'Kurzfrist-Momentum' };
-    }),
+      return { name: '24h-Momentum', ok: true, value: `${chg >= 0 ? '+' : ''}${chg.toFixed(1)}%`, points, note: 'Kurzfrist-Momentum' };
+    })(),
     biasSafeFactor('Risk-On-Kopplung (QQQ)', async () => {
       const q = await biasFinnhubQuote('QQQ');
       const points = q.chgPct >= 0.8 ? 1 : q.chgPct <= -0.8 ? -1 : 0;
