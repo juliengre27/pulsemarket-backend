@@ -13,7 +13,7 @@ const CALENDAR_SOURCE_URL = 'https://nfs.faireconomy.media/ff_calendar_thisweek.
 
 // Cache, damit nicht bei jeder Anfrage neu von Forex Factory geladen wird
 let cache = { data: null, lastFetch: 0 };
-const CACHE_DURATION_MS = 60 * 1000; // 1 Minute
+const CACHE_DURATION_MS = 15 * 60 * 1000; // 15 Minuten — schont Forex-Factory-Rate-Limit
 
 app.get('/', (req, res) => {
   res.json({ status: 'PulseMarket Backend läuft', endpoints: ['/calendar/today', '/geopolitics/today', '/trump/today', '/sentiment/fear-greed', '/gold/candles/:timeframe', '/gold/observation', '/gold/fundamentals', '/health'] });
@@ -45,9 +45,19 @@ app.get('/calendar/today', async (req, res) => {
       return res.json({ source: 'cache', ...cache.data });
     }
 
-    const response = await fetch(CALENDAR_SOURCE_URL);
+    const response = await fetch(CALENDAR_SOURCE_URL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
 
-    if (!response.ok) {
+   if (!response.ok) {
+      // Bei Rate-Limit (429) alten Cache weiterreichen, statt komplett auszufallen
+      if (cache.data) {
+        return res.json({ source: 'cache-stale', note: `Live-Abruf geblockt (${response.status}), zeige letzten Stand`, ...cache.data });
+      }
       throw new Error(`Forex Factory Feed antwortete mit Status ${response.status}`);
     }
 
