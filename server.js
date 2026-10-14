@@ -6,6 +6,14 @@ app.use(cors());
 
 const PORT = process.env.PORT || 3000;
 
+// ============ BIAS-ENGINE v2 (ESM-Modul in ./bias-engine) ============
+// Liefert /bias/v2 (Gold · NAS100 · BTC · DXY, Tag/Woche/Monat) und füllt den
+// Kalender mit FRED-Actuals, da Forex Factory keine Actual-Werte liefert.
+let biasEngine = null;
+import('./bias-engine/index.js')
+  .then(m => { biasEngine = m; m.registerBiasRoutes(app); console.log('Bias-Engine v2 geladen'); })
+  .catch(e => console.error('Bias-Engine v2 konnte nicht geladen werden:', e.message));
+
 // Diese Quelle ist komplett kostenlos und öffentlich — kein API-Key nötig.
 // Forex Factory veröffentlicht ihren Wirtschaftskalender als wöchentliche JSON-Datei,
 // die von vielen MT4/MT5 Trading-Tools genutzt wird.
@@ -84,7 +92,7 @@ app.get('/calendar/today', async (req, res) => {
       return evtDateBerlin === todayStrBerlin;
     });
 
-    const processed = todaysEvents.map((item, idx) => {
+    let processed = todaysEvents.map((item, idx) => {
       const time = new Date(item.date);
       const prediction = buildPrediction(item.title, item.country);
       return {
@@ -105,6 +113,12 @@ app.get('/calendar/today', async (req, res) => {
         prediction,
       };
     });
+
+    // Forex Factory liefert kein "actual" → US-Actuals aus FRED nachziehen (Bias-Engine)
+    if (biasEngine) {
+      try { processed = await biasEngine.enrichCalendarActuals(processed); }
+      catch (e) { console.error('Actual-Anreicherung fehlgeschlagen:', e.message); }
+    }
 
     cache = { data: { events: processed, count: processed.length }, lastFetch: now };
 
