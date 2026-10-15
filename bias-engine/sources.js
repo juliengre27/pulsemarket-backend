@@ -138,10 +138,16 @@ export function coinglassBtc() {
 }
 
 // ---------- FlashAlpha GEX (optional, FLASHALPHA_API_KEY) ----------
+// Free-Tier: 5 Requests/Tag. Der Cache liegt deshalb zusätzlich auf Disk (Volume), damit Neustarts
+// und ?fresh=1 das Kontingent nicht verbrennen. Pfad: neben BIAS_LOG_PATH, sonst ./gex-cache.json.
+import { writeFile as _wf } from 'node:fs/promises';
+const GEX_CACHE = process.env.GEX_CACHE_PATH || (process.env.BIAS_LOG_PATH ? process.env.BIAS_LOG_PATH.replace(/[^/]*$/, 'gex-cache.json') : './gex-cache.json');
 export function gexQQQ() {
-  return cached('gex:QQQ', 12 * H, async () => {  // Free-Tier: 5 Req/Tag → 12h-Cache
+  return cached('gex:QQQ', 12 * H, async () => {
     const key = process.env.FLASHALPHA_API_KEY;
     if (!key) throw new Error('FLASHALPHA_API_KEY fehlt (optional)');
+    // Disk-Cache zuerst: jünger als 12h → kein API-Call
+    try { const c = JSON.parse(await readFile(GEX_CACHE, 'utf8')); if (Date.now() - c.t < 12 * H) return c.v; } catch {}
     // Doku: GET /v1/exposure/{ticker}/gex, Header X-Api-Key. Fallback auf alte Pfadform, falls 404.
     // Auth-Varianten nacheinander probieren (Doku nennt X-Api-Key; 403 = Header/Key abgelehnt)
     const tries = [
@@ -155,11 +161,13 @@ export function gexQQQ() {
       r = await fetch(u, { headers: { accept: 'application/json', ...hh } });
       if (r.ok) break; codes.push(r.status);
     }
-    if (!r.ok) throw new Error(`flashalpha ${codes.join('/')} (Key im Dashboard prüfen: aktiviert? Header-Name?)`);
+    if (!r.ok) throw new Error(`flashalpha ${codes.join('/')} (429 = Tageslimit 5 Req. verbraucht; 403 = Key/Header prüfen)`);
     const j = await r.json(); const d = j.data ?? j;
     const pick = (...ks) => { for (const k of ks) { const v = k.split('.').reduce((o, p) => o?.[p], d); if (v != null) return +v; } return null; };
-    return { netGex: pick('net_gex', 'netGex', 'summary.net_gex', 'total_gex'), gammaFlip: pick('gamma_flip', 'gammaFlip', 'summary.gamma_flip', 'flip'),
+    const v = { netGex: pick('net_gex', 'netGex', 'summary.net_gex', 'total_gex'), gammaFlip: pick('gamma_flip', 'gammaFlip', 'summary.gamma_flip', 'flip'),
       callWall: pick('call_wall', 'callWall', 'summary.call_wall'), putWall: pick('put_wall', 'putWall', 'summary.put_wall'), regime: d.regime ?? d.summary?.regime ?? null, raw: j };
+    _wf(GEX_CACHE, JSON.stringify({ t: Date.now(), v })).catch(() => {});
+    return v;
   });
 }
 
