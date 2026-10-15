@@ -87,25 +87,38 @@ export function deribitBtc() {
     if (!r.ok) throw new Error(`deribit ${r.status}`);
     const rows = (await r.json()).result;
     const spot = rows[0]?.underlying_price ?? rows[0]?.estimated_delivery_price;
-    const byStrike = {};
-    let callOI = 0, putOI = 0;
+    // Expiry-Code (z. B. 31OCT26) → Datum
+    const MON = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+    const expDate = (code) => { const m = code.match(/^(\d{1,2})([A-Z]{3})(\d{2})$/); return m ? Date.UTC(2000 + +m[3], MON[m[2]], +m[1], 8) : null; };
+    const byExp = {};
     for (const o of rows) {
-      const [, , strike, type] = o.instrument_name.split('-');
+      const [, exp, strike, type] = o.instrument_name.split('-');
+      const e = (byExp[exp] ??= { exp, date: expDate(exp), byStrike: {}, callOI: 0, putOI: 0 });
       const k = +strike; const oi = o.open_interest || 0;
-      byStrike[k] ??= { call: 0, put: 0 };
-      if (type === 'C') { byStrike[k].call += oi; callOI += oi; } else { byStrike[k].put += oi; putOI += oi; }
+      e.byStrike[k] ??= { call: 0, put: 0 };
+      if (type === 'C') { e.byStrike[k].call += oi; e.callOI += oi; } else { e.byStrike[k].put += oi; e.putOI += oi; }
     }
-    const strikes = Object.keys(byStrike).map(Number).sort((a, b) => a - b);
-    // Max Pain
-    let best = null;
-    for (const s of strikes) {
-      let pain = 0;
-      for (const k of strikes) { pain += Math.max(0, s - k) * byStrike[k].call + Math.max(0, k - s) * byStrike[k].put; }
-      if (!best || pain < best.pain) best = { strike: s, pain };
-    }
-    const top = (t) => strikes.map(k => ({ k, v: byStrike[k][t] })).sort((a, b) => b.v - a.v).slice(0, 3);
-    return { spot, callOI, putOI, putCallRatio: putOI / Math.max(1, callOI), maxPain: best?.strike,
-      callWall: top('call')[0]?.k, putWall: top('put')[0]?.k, topCalls: top('call'), topPuts: top('put') };
+    const analyse = (byStrike) => {
+      const strikes = Object.keys(byStrike).map(Number).sort((a, b) => a - b);
+      let best = null;
+      for (const s of strikes) {
+        let pain = 0;
+        for (const k of strikes) pain += Math.max(0, s - k) * byStrike[k].call + Math.max(0, k - s) * byStrike[k].put;
+        if (!best || pain < best.pain) best = { strike: s, pain };
+      }
+      const top = (t) => strikes.map(k => ({ k, v: byStrike[k][t] })).sort((a, b) => b.v - a.v).slice(0, 3);
+      return { maxPain: best?.strike, callWall: top('call')[0]?.k, putWall: top('put')[0]?.k, topCalls: top('call'), topPuts: top('put') };
+    };
+    // Gesamtbild (alle Verfälle) …
+    const all = {}; let callOI = 0, putOI = 0;
+    for (const e of Object.values(byExp)) { callOI += e.callOI; putOI += e.putOI; for (const [k, v] of Object.entries(e.byStrike)) { all[k] ??= { call: 0, put: 0 }; all[k].call += v.call; all[k].put += v.put; } }
+    const total = analyse(all);
+    // … und der nächste große Verfall (letzter Freitag des Monats = Monats-/Quartalsverfall) mit relevantem OI
+    const now = Date.now();
+    const isMonthly = (d) => { const x = new Date(d); const nx = new Date(x); nx.setUTCDate(x.getUTCDate() + 7); return x.getUTCDay() === 5 && nx.getUTCMonth() !== x.getUTCMonth(); };
+    const next = Object.values(byExp).filter(e => e.date && e.date > now && isMonthly(e.date)).sort((a, b) => a.date - b.date)[0];
+    const nextExp = next ? { exp: next.exp, date: new Date(next.date).toISOString().slice(0, 10), callOI: next.callOI, putOI: next.putOI, putCallRatio: next.putOI / Math.max(1, next.callOI), ...analyse(next.byStrike) } : null;
+    return { spot, callOI, putOI, putCallRatio: putOI / Math.max(1, callOI), ...total, nextExpiry: nextExp };
   });
 }
 
@@ -129,10 +142,15 @@ export function gexQQQ() {
   return cached('gex:QQQ', 12 * H, async () => {  // Free-Tier: 5 Req/Tag → 12h-Cache
     const key = process.env.FLASHALPHA_API_KEY;
     if (!key) throw new Error('FLASHALPHA_API_KEY fehlt (optional)');
-    const r = await fetch('https://lab.flashalpha.com/v1/exposure/QQQ/gex', { headers: { Authorization: `Bearer ${key}` } });
+    // Doku: GET /v1/exposure/{ticker}/gex, Header X-Api-Key. Fallback auf alte Pfadform, falls 404.
+    const h = { 'X-Api-Key': key, accept: 'application/json' };
+    let r = await fetch('https://lab.flashalpha.com/v1/exposure/QQQ/gex', { headers: h });
+    if (r.status === 404) r = await fetch('https://lab.flashalpha.com/v1/exposure/gex/QQQ', { headers: h });
     if (!r.ok) throw new Error(`flashalpha ${r.status}`);
-    const j = await r.json();
-    return { netGex: j.net_gex ?? j.netGex, gammaFlip: j.gamma_flip ?? j.gammaFlip, callWall: j.call_wall ?? j.callWall, putWall: j.put_wall ?? j.putWall, regime: j.regime, raw: j };
+    const j = await r.json(); const d = j.data ?? j;
+    const pick = (...ks) => { for (const k of ks) { const v = k.split('.').reduce((o, p) => o?.[p], d); if (v != null) return +v; } return null; };
+    return { netGex: pick('net_gex', 'netGex', 'summary.net_gex', 'total_gex'), gammaFlip: pick('gamma_flip', 'gammaFlip', 'summary.gamma_flip', 'flip'),
+      callWall: pick('call_wall', 'callWall', 'summary.call_wall'), putWall: pick('put_wall', 'putWall', 'summary.put_wall'), regime: d.regime ?? d.summary?.regime ?? null, raw: j };
   });
 }
 
@@ -151,6 +169,16 @@ export function myfxbook() {
     if (j.error) { MFB_SESSION = null; throw new Error(`myfxbook outlook: ${j.message}`); }
     const pick = (n) => j.symbols.find(s => s.name === n);
     return { XAUUSD: pick('XAUUSD'), EURUSD: pick('EURUSD'), USDJPY: pick('USDJPY') };
+  });
+}
+
+// ---------- Forex-Factory-Wochenkalender (für Event-Risiko der Szenarien) ----------
+export function ffWeek() {
+  return cached('ff:week', 30 * 60e3, async () => {
+    const r = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', { headers: { 'User-Agent': 'Mozilla/5.0 PulseMarket', Accept: 'application/json' } });
+    if (!r.ok) throw new Error(`forexfactory ${r.status}`);
+    const raw = await r.json();
+    return { events: raw.map(x => ({ title: x.title, country: x.country, impact: x.impact, timestamp: x.date ? Math.floor(new Date(x.date).getTime() / 1000) : null })) };
   });
 }
 

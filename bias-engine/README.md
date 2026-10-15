@@ -29,6 +29,19 @@
 Forex Factory liefert kein `actual`. `calendar-actuals.js` zieht für US-Events (CPI, Core CPI, NFP, Unemployment, Core PCE, Retail Sales, Claims, JOLTS, GDP, PPI, AHE) den Actual aus FRED, sobald die Release-Zeit vorbei ist, und schreibt `{date, code, actual, forecast}` nach `events-log.jsonl`. Dieses Log ist die Surprise-Historie für den Bias – sie baut sich ab dem ersten Deploy von selbst auf. `events.json` ist nur für manuelles Nachtragen älterer Releases (Format: `{"date":"2026-09-11","code":"CPI_YOY","actual":2.9,"forecast":2.8}`).
 ISM-Daten gibt es nicht auf FRED → bleiben "Steht noch aus", bis eine zweite Quelle kommt.
 
+## Version 2.1 (15.10.)
+- FlashAlpha: Header `X-Api-Key` statt Bearer (war der 404-Grund).
+- Deribit: Levels für den nächsten Monatsverfall (`nextExpiry`) statt nur Gesamt-OI; `allExpiries` bleibt als Kontext.
+- Retail-Level (Ø-Einstieg Long/Short) als Level-Chips; `trapped` zeigt, welche Seite im Verlust sitzt.
+- `/bias/v2?fresh=1` umgeht den 15-Min-Cache.
+- Frontend: alte Tages-Bias-Reihe ausgeblendet, Hero-Karten aus v2 (Wochen-Score), "Warum?"-Expander mit Klartext je Karte.
+
+## Version 2.2 – Szenarien (`scenarios.js`)
+Pro Asset drei bedingte Szenarien für die nächsten ~5 Handelstage: Fortsetzung oben / unten / Range – jeweils mit Wahrscheinlichkeit, Preisspanne (0,5–1,5σ aus der realisierten 20-Tage-Vola), Trigger und Invalidierungslevel. Level aus Options-OI, Retail-Einstiegen und 10/20-Tage-Swings, mindestens 0,5σ vom Preis entfernt.
+- Wahrscheinlichkeit: Bias-Score (Woche 70 % / Tag 30 %) → max. 68/32; COT-Extrem dämpft; **Event-Risiko** (High-Impact-USD-Events in 5 Tagen, CPI/NFP/FOMC/PCE voll gewichtet) staucht Richtung 50/50.
+- `trapNote`: welche Retail-Seite im Verlust sitzt und wo ihre Stops liegen.
+- Bewusst **keine Punktprognose** (BaFin: öffentliches Tool, IB-Geschäft). Wahrscheinlichkeiten sind unkalibriert – Kalibrierung nach 60 Tagen aus `bias-log.jsonl`, dort werden Basisszenario und Level mitgeloggt.
+
 ## Dateien
 `package.json` (`"type":"module"`) ist Pflicht – `server.js` ist CommonJS, das Modul ESM.
 

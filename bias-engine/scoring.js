@@ -106,22 +106,33 @@ export function syntheticUsdCot(cotMap) { // -(Summe der Fremdwährungs-Nets) + 
 // ---------- 5) STRUKTUR (nur Tages-/Wochenhorizont) ----------
 export function structureBtc(deribit, cg, spot) {
   if (!deribit?.maxPain) return { score: 0, regime: 'unknown' };
+  // Nächster Monatsverfall ist für den Tages-/Wochen-Magneten relevant; Gesamt-OI nur als Kontext
+  const n = deribit.nextExpiry && deribit.nextExpiry.callOI + deribit.nextExpiry.putOI > 5000 ? deribit.nextExpiry : null;
+  const lv = n ?? deribit;
   let s = 0;
-  if (spot && deribit.maxPain) s += clamp((deribit.maxPain / spot - 1) * 20, -1, 1);   // Magnet zum Max Pain
-  s += clamp((1 - deribit.putCallRatio) * 1, -0.5, 0.5);
-  if (cg?.fundingRate != null) s -= clamp(cg.fundingRate * 2000, -0.5, 0.5);          // überhitztes Funding = contrarian
+  if (spot && lv.maxPain) s += clamp((lv.maxPain / spot - 1) * 20, -1, 1);          // Magnet zum Max Pain
+  s += clamp((1 - lv.putCallRatio) * 1, -0.5, 0.5);
+  if (cg?.fundingRate != null) s -= clamp(cg.fundingRate * 2000, -0.5, 0.5);        // überhitztes Funding = contrarian
   if (cg?.longShortRatio != null) s -= clamp((cg.longShortRatio - 1) * 1.5, -0.5, 0.5);
-  return { score: clamp(s), levels: { callWall: deribit.callWall, putWall: deribit.putWall, maxPain: deribit.maxPain }, funding: cg?.fundingRate ?? null, longShort: cg?.longShortRatio ?? null };
+  const regime = spot && lv.callWall && lv.putWall ? (spot > lv.callWall ? 'über Call-Wall' : spot < lv.putWall ? 'unter Put-Wall' : 'zwischen den Walls') : null;
+  return { score: clamp(s), regime, expiry: n ? n.date : 'alle Verfälle',
+    levels: { callWall: lv.callWall, putWall: lv.putWall, maxPain: lv.maxPain },
+    allExpiries: { callWall: deribit.callWall, putWall: deribit.putWall, maxPain: deribit.maxPain },
+    funding: cg?.fundingRate ?? null, longShort: cg?.longShortRatio ?? null };
 }
 export function structureNas(gex, vix) {
   if (!gex?.netGex && gex?.netGex !== 0) return { score: 0, regime: vix > 25 ? 'trend_high_vol' : 'unknown' };
   const regime = gex.netGex > 0 ? 'range_positive_gamma' : 'trend_negative_gamma';
   return { score: 0, regime, levels: { callWall: gex.callWall, putWall: gex.putWall, gammaFlip: gex.gammaFlip }, netGex: gex.netGex };
 }
-export function crowdScore(sym) { // Myfxbook: {longPercentage, shortPercentage, avgLongPrice, avgShortPrice}
+export function crowdScore(sym, spot = null) { // Myfxbook: {longPercentage, shortPercentage, avgLongPrice, avgShortPrice}
   if (!sym) return { score: 0 };
-  const lp = +sym.longPercentage;
-  return { score: clamp((50 - lp) / 15), longPct: lp, avgLongEntry: +sym.avgLongPrice, avgShortEntry: +sym.avgShortPrice };
+  const lp = +sym.longPercentage, al = +sym.avgLongPrice, as = +sym.avgShortPrice;
+  // Wer sitzt im Verlust? Deren Stops sind der Liquiditätspool.
+  let trapped = null;
+  if (spot && al && as) trapped = lp >= 50 && spot < al ? 'longs' : lp < 50 && spot > as ? 'shorts' : 'none';
+  return { score: clamp((50 - lp) / 15), longPct: lp, avgLongEntry: al, avgShortEntry: as, trapped,
+    levels: { retailLongEntry: al || null, retailShortEntry: as || null } };
 }
 
 // ---------- KOMBINATION PRO HORIZONT ----------
