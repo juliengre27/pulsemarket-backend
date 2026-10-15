@@ -77,7 +77,8 @@ export async function computeBias() {
   gold.scenarios = buildScenarios(gold, d.gold.closes, { eventRisk, label: 'Gold' });
   nas.scenarios  = buildScenarios(nas,  d.nas.closes,  { eventRisk, label: 'NAS100' });
   btc.scenarios  = buildScenarios(btc,  d.btc.closes,  { eventRisk: eventRisk * 0.6, label: 'Bitcoin' }); // BTC reagiert schwächer auf US-Makro
-  const dxyAsset = { horizons: dxyOut, components: dxyParts, levels: dxyParts.crowd?.levels ?? null, regime: null };
+  // DXY: keine Retail-Level übergeben – die sind EURUSD-Kurse und würden als DXY-Support fehlinterpretiert
+  const dxyAsset = { horizons: dxyOut, components: { ...dxyParts, crowd: { ...dxyParts.crowd, trapped: null, levels: null } }, levels: null, regime: null };
   const dxyScen = buildScenarios(dxyAsset, d.dxy.closes, { eventRisk, label: 'DXY' });
 
   return {

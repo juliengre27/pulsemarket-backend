@@ -50,12 +50,15 @@ export function buildScenarios(a, closes, { eventRisk = 0, label = '' } = {}) {
   const fmt = v => r2(v, dec).toLocaleString('de-DE', { minimumFractionDigits: dec, maximumFractionDigits: dec });
   const pct = v => ((v / px - 1) * 100).toFixed(1) + ' %';
 
-  const up = { name: 'Fortsetzung nach oben', p: r2(pUpDir * 100), from: r2(px + sigma5 * 0.5, dec), to: r2(px + sigma5 * 1.5, dec),
+  // Zielzone beginnt am Ausbruchslevel (nicht am aktuellen Preis) und reicht 1σ darüber hinaus
+  const upFrom = Math.max(resist, px + sigma5 * 0.5), upTo = upFrom + sigma5;
+  const dnTo = Math.min(support, px - sigma5 * 0.5), dnFrom = dnTo - sigma5;
+  const up = { name: 'Fortsetzung nach oben', p: r2(pUpDir * 100), from: r2(upFrom, dec), to: r2(upTo, dec),
     trigger: `Tagesschluss über ${fmt(resist)}`, invalidation: `Schluss unter ${fmt(support)}`,
-    text: `Bruch über ${fmt(resist)} (${pct(resist)}) öffnet ${fmt(px + sigma5 * 0.5)}–${fmt(px + sigma5 * 1.5)} (1σ-Spanne der nächsten 5 Tage).` };
-  const dn = { name: 'Fortsetzung nach unten', p: r2(pDnDir * 100), from: r2(px - sigma5 * 1.5, dec), to: r2(px - sigma5 * 0.5, dec),
+    text: `Bruch über ${fmt(resist)} (${pct(resist)}) öffnet ${fmt(upFrom)}–${fmt(upTo)} (Ausbruchslevel + 1σ).` };
+  const dn = { name: 'Fortsetzung nach unten', p: r2(pDnDir * 100), from: r2(dnFrom, dec), to: r2(dnTo, dec),
     trigger: `Tagesschluss unter ${fmt(support)}`, invalidation: `Schluss über ${fmt(resist)}`,
-    text: `Bruch unter ${fmt(support)} (${pct(support)}) öffnet ${fmt(px - sigma5 * 1.5)}–${fmt(px - sigma5 * 0.5)}.` };
+    text: `Bruch unter ${fmt(support)} (${pct(support)}) öffnet ${fmt(dnFrom)}–${fmt(dnTo)} (Ausbruchslevel − 1σ).` };
   const rg = { name: 'Range', p: r2(pRange * 100), from: r2(support, dec), to: r2(resist, dec),
     trigger: `Preis bleibt zwischen ${fmt(support)} und ${fmt(resist)}`, invalidation: 'Tagesschluss außerhalb der Spanne',
     text: `Seitwärts zwischen ${fmt(support)} und ${fmt(resist)}${magnet ? `, Max Pain ${fmt(magnet)} als Magnet bis zum Verfall` : ''}.` };

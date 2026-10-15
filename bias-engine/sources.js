@@ -143,10 +143,19 @@ export function gexQQQ() {
     const key = process.env.FLASHALPHA_API_KEY;
     if (!key) throw new Error('FLASHALPHA_API_KEY fehlt (optional)');
     // Doku: GET /v1/exposure/{ticker}/gex, Header X-Api-Key. Fallback auf alte Pfadform, falls 404.
-    const h = { 'X-Api-Key': key, accept: 'application/json' };
-    let r = await fetch('https://lab.flashalpha.com/v1/exposure/QQQ/gex', { headers: h });
-    if (r.status === 404) r = await fetch('https://lab.flashalpha.com/v1/exposure/gex/QQQ', { headers: h });
-    if (!r.ok) throw new Error(`flashalpha ${r.status}`);
+    // Auth-Varianten nacheinander probieren (Doku nennt X-Api-Key; 403 = Header/Key abgelehnt)
+    const tries = [
+      ['https://lab.flashalpha.com/v1/exposure/QQQ/gex', { 'X-Api-Key': key }],
+      ['https://lab.flashalpha.com/v1/exposure/QQQ/gex', { 'x-api-key': key, Authorization: `Bearer ${key}` }],
+      [`https://lab.flashalpha.com/v1/exposure/QQQ/gex?api_key=${encodeURIComponent(key)}`, {}],
+      ['https://lab.flashalpha.com/v1/exposure/gex/QQQ', { 'X-Api-Key': key }],
+    ];
+    let r, codes = [];
+    for (const [u, hh] of tries) {
+      r = await fetch(u, { headers: { accept: 'application/json', ...hh } });
+      if (r.ok) break; codes.push(r.status);
+    }
+    if (!r.ok) throw new Error(`flashalpha ${codes.join('/')} (Key im Dashboard prüfen: aktiviert? Header-Name?)`);
     const j = await r.json(); const d = j.data ?? j;
     const pick = (...ks) => { for (const k of ks) { const v = k.split('.').reduce((o, p) => o?.[p], d); if (v != null) return +v; } return null; };
     return { netGex: pick('net_gex', 'netGex', 'summary.net_gex', 'total_gex'), gammaFlip: pick('gamma_flip', 'gammaFlip', 'summary.gamma_flip', 'flip'),
