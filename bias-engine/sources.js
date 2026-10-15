@@ -190,12 +190,22 @@ export function myfxbook() {
 }
 
 // ---------- Forex-Factory-Wochenkalender (für Event-Risiko der Szenarien) ----------
+// FF limitiert hart (429) – deshalb 60-Min-Cache im RAM + Disk-Kopie auf dem Volume; bei 429 wird die
+// Disk-Kopie weiterverwendet (Kalender der laufenden Woche ändert sich kaum), statt eventRisk auf 0 zu setzen.
+const FF_CACHE = process.env.FF_CACHE_PATH || (process.env.BIAS_LOG_PATH ? process.env.BIAS_LOG_PATH.replace(/[^/]*$/, 'ff-week.json') : './ff-week.json');
 export function ffWeek() {
-  return cached('ff:week', 30 * 60e3, async () => {
-    const r = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', { headers: { 'User-Agent': 'Mozilla/5.0 PulseMarket', Accept: 'application/json' } });
-    if (!r.ok) throw new Error(`forexfactory ${r.status}`);
+  return cached('ff:week', 60 * 60e3, async () => {
+    try { const c = JSON.parse(await readFile(FF_CACHE, 'utf8')); if (Date.now() - c.t < 60 * 60e3) return c.v; } catch {}
+    const r = await fetch('https://nfs.faireconomy.media/ff_calendar_thisweek.json', { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36', Accept: 'application/json' } });
+    if (!r.ok) {
+      // Fallback: Disk-Kopie beliebigen Alters (bis 7 Tage) – besser als kein Event-Risiko
+      try { const c = JSON.parse(await readFile(FF_CACHE, 'utf8')); if (Date.now() - c.t < 7 * D) return { ...c.v, note: `forexfactory ${r.status}, Disk-Kopie von ${new Date(c.t).toISOString()}` }; } catch {}
+      throw new Error(`forexfactory ${r.status}`);
+    }
     const raw = await r.json();
-    return { events: raw.map(x => ({ title: x.title, country: x.country, impact: x.impact, timestamp: x.date ? Math.floor(new Date(x.date).getTime() / 1000) : null })) };
+    const v = { events: raw.map(x => ({ title: x.title, country: x.country, impact: x.impact, timestamp: x.date ? Math.floor(new Date(x.date).getTime() / 1000) : null })) };
+    _wf(FF_CACHE, JSON.stringify({ t: Date.now(), v })).catch(() => {});
+    return v;
   });
 }
 
