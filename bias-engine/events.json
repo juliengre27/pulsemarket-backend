@@ -1,1 +1,296 @@
-[]
+[
+ {
+  "date": "2026-10-14",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.3,
+  "forecast": 0.2
+ },
+ {
+  "date": "2026-09-11",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.3,
+  "forecast": 0.2
+ },
+ {
+  "date": "2026-08-12",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.2,
+  "forecast": 0.2
+ },
+ {
+  "date": "2026-07-14",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.0,
+  "forecast": 0.2
+ },
+ {
+  "date": "2026-06-10",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.2,
+  "forecast": 0.3
+ },
+ {
+  "date": "2026-05-12",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.4,
+  "forecast": 0.3
+ },
+ {
+  "date": "2026-04-10",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.2,
+  "forecast": 0.3
+ },
+ {
+  "date": "2026-03-11",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.2,
+  "forecast": 0.2
+ },
+ {
+  "date": "2026-02-13",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.3,
+  "forecast": 0.3
+ },
+ {
+  "date": "2026-01-13",
+  "code": "CORE_CPI_MOM",
+  "actual": 0.2,
+  "forecast": 0.3
+ },
+ {
+  "date": "2026-10-02",
+  "code": "NFP",
+  "actual": 29,
+  "forecast": 89
+ },
+ {
+  "date": "2026-09-04",
+  "code": "NFP",
+  "actual": 162,
+  "forecast": 55
+ },
+ {
+  "date": "2026-08-07",
+  "code": "NFP",
+  "actual": -23,
+  "forecast": 85
+ },
+ {
+  "date": "2026-07-02",
+  "code": "NFP",
+  "actual": 57,
+  "forecast": 114
+ },
+ {
+  "date": "2026-06-05",
+  "code": "NFP",
+  "actual": 172,
+  "forecast": 85
+ },
+ {
+  "date": "2026-05-08",
+  "code": "NFP",
+  "actual": 115,
+  "forecast": 65
+ },
+ {
+  "date": "2026-04-03",
+  "code": "NFP",
+  "actual": 178,
+  "forecast": 65
+ },
+ {
+  "date": "2026-03-06",
+  "code": "NFP",
+  "actual": -92,
+  "forecast": 58
+ },
+ {
+  "date": "2026-02-11",
+  "code": "NFP",
+  "actual": 130,
+  "forecast": 66
+ },
+ {
+  "date": "2026-01-09",
+  "code": "NFP",
+  "actual": 50,
+  "forecast": 66
+ },
+ {
+  "date": "2026-10-02",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.2,
+  "forecast": 4.1
+ },
+ {
+  "date": "2026-09-04",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.1,
+  "forecast": 4.1
+ },
+ {
+  "date": "2026-08-07",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.1,
+  "forecast": 4.2
+ },
+ {
+  "date": "2026-07-02",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.2,
+  "forecast": 4.3
+ },
+ {
+  "date": "2026-06-05",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.3,
+  "forecast": 4.3
+ },
+ {
+  "date": "2026-05-08",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.3,
+  "forecast": 4.3
+ },
+ {
+  "date": "2026-04-03",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.3,
+  "forecast": 4.4
+ },
+ {
+  "date": "2026-03-06",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.4,
+  "forecast": 4.3
+ },
+ {
+  "date": "2026-02-11",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.3,
+  "forecast": 4.4
+ },
+ {
+  "date": "2026-01-09",
+  "code": "UNEMPLOYMENT",
+  "actual": 4.4,
+  "forecast": 4.5
+ },
+ {
+  "date": "2026-10-14",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.6,
+  "forecast": 2.5
+ },
+ {
+  "date": "2026-09-11",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.4,
+  "forecast": 2.4
+ },
+ {
+  "date": "2026-08-12",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.5,
+  "forecast": 2.5
+ },
+ {
+  "date": "2026-07-14",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.6,
+  "forecast": 2.8
+ },
+ {
+  "date": "2026-06-10",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.9,
+  "forecast": 2.9
+ },
+ {
+  "date": "2026-05-12",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.8,
+  "forecast": 2.7
+ },
+ {
+  "date": "2026-04-10",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.6,
+  "forecast": 2.7
+ },
+ {
+  "date": "2026-03-11",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.5,
+  "forecast": 2.5
+ },
+ {
+  "date": "2026-02-13",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.5,
+  "forecast": 2.5
+ },
+ {
+  "date": "2026-01-13",
+  "code": "CORE_CPI_YOY",
+  "actual": 2.6,
+  "forecast": 2.7
+ },
+ {
+  "date": "2026-09-30",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.0,
+  "forecast": 3.3
+ },
+ {
+  "date": "2026-08-26",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.3,
+  "forecast": 3.3
+ },
+ {
+  "date": "2026-07-30",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.3,
+  "forecast": 3.3
+ },
+ {
+  "date": "2026-06-25",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.4,
+  "forecast": 3.4
+ },
+ {
+  "date": "2026-05-28",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.3,
+  "forecast": 3.3
+ },
+ {
+  "date": "2026-04-30",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.2,
+  "forecast": 3.2
+ },
+ {
+  "date": "2026-04-09",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.0,
+  "forecast": 3.0
+ },
+ {
+  "date": "2026-03-13",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.1,
+  "forecast": 3.1
+ },
+ {
+  "date": "2026-02-20",
+  "code": "CORE_PCE_YOY",
+  "actual": 3.0,
+  "forecast": 2.9
+ }
+]
