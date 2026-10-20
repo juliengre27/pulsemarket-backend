@@ -103,7 +103,7 @@ export async function computeBias() {
   // DXY: keine Retail-Level übergeben – die sind EURUSD-Kurse und würden als DXY-Support fehlinterpretiert
   const dxyAsset = { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct, crowd: { ...dxyParts.crowd, trapped: null, levels: null } }, levels: null, regime: dxyStruct?.regime ?? null };
   const dxyScen = buildScenarios(dxyAsset, d.dxy.closes, { eventRisk, label: 'DXY' });
-  const dxyToday = buildTodayScenario(dxyAsset, ohlc.DXY, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'DXY' });
+  const dxyToday = buildTodayScenario(dxyAsset, ohlc.DXY, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'DXY', asset: 'DXY' });
 
   // Vorwarnung für den Wochenhorizont: schweres Event (FOMC/CPI/NFP) in 5–10 Tagen liegt außerhalb des 5-Tage-eventRisk
   const heavyAhead = (intra.upcoming || []).filter(u => u.heavy);

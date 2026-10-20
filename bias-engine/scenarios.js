@@ -85,50 +85,71 @@ export function buildScenarios(a, closes, { eventRisk = 0, label = '' } = {}) {
 // ---------- TAGESSZENARIO (heute, Horizont bis zum nächsten Tagesschluss) ----------
 // Arbeitet mit Vortages-High/Low/Close, ATR(14) und Session-Range aus intraday.js – nicht mit Wochen-Swings.
 // Trigger sind Preislevel (nicht Tagesschlüsse), weil intraday gehandelt wird.
-export function buildTodayScenario(a, ohlc, { eventsToday = [], label = '' } = {}) {
+//
+// Parameter aus dem Backtest (≈850 Tage, Dez 2025–Okt 2026, Entscheidung 09:00 UTC) – siehe /bias/backtest:
+//   • innerhalb der Vortagesrange gibt es KEINE Richtung (Lean 43–52 % über alle vier Assets) → nur Range + Ausbruchslevel
+//   • Expansion läuft bei Gold/DXY durch (Lean ~60 %), bei NAS/BTC nicht (50 %) → Fortsetzungs-Bonus nur für Gold/DXY
+//   • Range-Basis: NAS trendet intraday (Range nur 45 % getroffen) → niedrigere Range-Wahrscheinlichkeit als Gold/BTC/DXY
+//   • Modell war unterkonfident (44 % gesagt, 53–61 % eingetreten) → Streckung; NAS war kalibriert → keine Streckung
+//   Streckung und Boni sind In-Sample – der Beweis kommt aus dem Live-Log (bias-log.jsonl), nicht aus dem Backtest.
+export const TODAY_PARAMS = {
+  GOLD:   { contBonus: 0.10, rangeBase: 0.50, stretch: 1.25 },
+  DXY:    { contBonus: 0.10, rangeBase: 0.50, stretch: 1.25 },
+  BTC:    { contBonus: 0.02, rangeBase: 0.50, stretch: 1.20 },
+  NAS100: { contBonus: 0.00, rangeBase: 0.36, stretch: 1.00 },
+  DEFAULT:{ contBonus: 0.04, rangeBase: 0.45, stretch: 1.10 },
+};
+export function buildTodayScenario(a, ohlc, { eventsToday = [], label = '', asset = null } = {}) {
   if (!ohlc?.prevHigh || !ohlc?.prevLow || !ohlc?.atr14) return null;
+  const P = TODAY_PARAMS[asset || a?.asset] || TODAY_PARAMS.DEFAULT;
   const px = ohlc.price, pdh = ohlc.prevHigh, pdl = ohlc.prevLow, pdc = ohlc.prevClose, atr = ohlc.atr14, wo = ohlc.weekOpen;
   const dec = decimals(px); const fmt = v => r2(v, dec).toLocaleString('de-DE', { minimumFractionDigits: dec, maximumFractionDigits: dec });
   const day = a.horizons?.daily?.score ?? 0;
   const used = (ohlc.atrUsedPct ?? 0) / 100;
   const evtSoon = eventsToday.length ? Math.max(...eventsToday.map(e => e.weight ?? 0.5)) : 0;
-
-  // Richtung: Tages-Score → pUp; Expansion in Richtung → Bonus; Event heute → Richtung Richtung 50/50
-  let pUp = 0.5 + day * 0.1;
   const above = px > pdh, below = px < pdl;
-  if (above) pUp += 0.08; if (below) pUp -= 0.08;
-  pUp = 0.5 + (pUp - 0.5) * (1 - 0.5 * evtSoon);
-  pUp = clamp(pUp, 0.3, 0.7);
-  // Range-Wahrscheinlichkeit: innerhalb Vortagesrange hoch; viel ATR schon verbraucht → noch höher; Event heute → höher
-  let pRange = above || below ? 0.3 : 0.42;
-  if (used > 0.8) pRange += 0.15; else if (used > 0.5) pRange += 0.05;
-  pRange += 0.12 * evtSoon;
-  pRange = clamp(pRange, 0.2, 0.65);
-  const pU = (1 - pRange) * pUp, pD = (1 - pRange) * (1 - pUp);
+  const stretch = p => { const q = p.map(x => 1 / 3 + (x - 1 / 3) * P.stretch).map(x => clamp(x, 0.05, 0.9)); const s = q.reduce((t, x) => t + x, 0); return q.map(x => x / s); };
 
-  // Level: innerhalb → Range = Vortag; Ausbruch → Zielzone = Ausbruchslevel bis 0,6 ATR dahinter (Tagesziel, nicht Wochenziel)
-  let rangeLo, rangeHi, upFrom, upTo, dnFrom, dnTo, upTrig, dnTrig, note;
-  // Drei Fälle: Expansion über PDH, Expansion unter PDL, innerhalb. Bei Expansion ist die "Gegenrichtung" eine volle Umkehr
-  // zurück über den Vortagesschluss bis zur anderen Seite der Vortagesrange – selten, aber das ist der Trade bei Fehlausbrüchen.
-  if (above) { rangeLo = pdh; rangeHi = Math.max(px, ohlc.sessionHigh ?? px); upFrom = Math.max(px, pdh); upTo = Math.max(pdc + atr, px + atr * 0.4); dnFrom = pdl; dnTo = pdc; upTrig = `Preis hält über ${fmt(pdh)}`; dnTrig = `Preis zurück unter ${fmt(pdc)} (Vortagesschluss)`; note = `Expansion über das Vortageshoch ${fmt(pdh)}.`; }
-  else if (below) { rangeLo = Math.min(px, ohlc.sessionLow ?? px); rangeHi = pdl; dnFrom = Math.min(pdc - atr, px - atr * 0.4); dnTo = Math.min(px, pdl); upFrom = pdc; upTo = pdh; dnTrig = `Preis hält unter ${fmt(pdl)}`; upTrig = `Preis zurück über ${fmt(pdc)} (Vortagesschluss)`; note = `Expansion unter das Vortagestief ${fmt(pdl)}.`; }
-  else { rangeLo = pdl; rangeHi = pdh; upFrom = pdh; upTo = pdh + atr * 0.6; dnTo = pdl; dnFrom = pdl - atr * 0.6; upTrig = `Preis über ${fmt(pdh)}`; dnTrig = `Preis unter ${fmt(pdl)}`; note = `Preis innerhalb der Vortagesrange (${Math.round((ohlc.posInPrevRangePct ?? 50))} % von unten).`; }
-
-  const up = { name: above ? 'Fortsetzung nach oben' : below ? 'Volle Umkehr nach oben' : 'Ausbruch nach oben', p: r2(pU * 100), from: r2(upFrom, dec), to: r2(upTo, dec), trigger: upTrig, invalidation: `Preis unter ${fmt(below ? pdc - atr : pdl)}`,
-    text: above ? `Hält der Preis über ${fmt(pdh)}, ist ${fmt(upTo)} (Vortagesschluss + 1 ATR) das Tagesziel.` : below ? `Fehlausbruch nach unten: zurück über ${fmt(pdc)} öffnet den Weg zum Vortageshoch ${fmt(pdh)}.` : `Bruch über ${fmt(pdh)} öffnet ${fmt(upFrom)}–${fmt(upTo)} (0,6 ATR).` };
-  const dn = { name: below ? 'Fortsetzung nach unten' : above ? 'Volle Umkehr nach unten' : 'Ausbruch nach unten', p: r2(pD * 100), from: r2(dnFrom, dec), to: r2(dnTo, dec), trigger: dnTrig, invalidation: `Preis über ${fmt(above ? pdc + atr : pdh)}`,
-    text: below ? `Hält der Preis unter ${fmt(pdl)}, ist ${fmt(dnFrom)} (Vortagesschluss − 1 ATR) das Tagesziel.` : above ? `Fehlausbruch nach oben: zurück unter ${fmt(pdc)} öffnet den Weg zum Vortagestief ${fmt(pdl)}.` : `Bruch unter ${fmt(pdl)} öffnet ${fmt(dnFrom)}–${fmt(dnTo)} (0,6 ATR).` };
-  const rg = { name: above || below ? 'Rückkehr in die Vortagesrange' : 'Range', p: r2(pRange * 100), from: r2(above ? pdh : below ? pdl : rangeLo, dec), to: r2(above ? pdc : below ? pdc : rangeHi, dec),
-    trigger: above ? `Preis fällt zurück unter ${fmt(pdh)}` : below ? `Preis steigt zurück über ${fmt(pdl)}` : `Preis bleibt zwischen ${fmt(pdl)} und ${fmt(pdh)}`, invalidation: above ? `Preis über ${fmt(pdc + atr)}` : below ? `Preis unter ${fmt(pdc - atr)}` : 'Preis läuft am Ausbruchslevel vorbei',
-    text: above ? `Ausbruch verpufft: zurück unter ${fmt(pdh)}, Vortagesschluss ${fmt(pdc)} als Magnet.` : below ? `Ausbruch verpufft: zurück über ${fmt(pdl)}, Vortagesschluss ${fmt(pdc)} als Magnet.` : `Seitwärts zwischen ${fmt(pdl)} und ${fmt(pdh)}; ${fmt(pdc)} (Vortagesschluss) und ${fmt(wo)} (Wochen-Open) als Magneten.` };
+  let up, dn, rg, note;
+  if (above || below) {
+    // ---- Expansion: Fortsetzung (Schluss jenseits des Ausbruchslevels) · Rückkehr (Schluss in der Vortagesrange) · Umkehr (Schluss jenseits der Gegenseite)
+    // Gleichwertige Bänder – die alte Definition (Rückkehr = zwischen Vortagestief und -schluss) traf nur in 4–9 % der Fälle.
+    let pCont = 0.5 + P.contBonus + clamp(day * (above ? 1 : -1), -2, 2) * 0.03;  // Tages-Score in Ausbruchsrichtung stützt
+    pCont = 0.5 + (pCont - 0.5) * (1 - 0.5 * evtSoon);
+    let pRet = 0.32 + 0.12 * evtSoon; let pRev = 1 - pCont - pRet; if (pRev < 0.06) { pRev = 0.06; pRet = 1 - pCont - pRev; }
+    const [pC, pR, pV] = stretch([pCont, pRet, pRev]);
+    const lvl = above ? pdh : pdl;
+    const target = above ? Math.max(pdc + atr, px + atr * 0.4) : Math.min(pdc - atr, px - atr * 0.4);
+    const cont = { name: above ? 'Fortsetzung nach oben' : 'Fortsetzung nach unten', p: r2(pC * 100), from: r2(above ? Math.max(px, pdh) : target, dec), to: r2(above ? target : Math.min(px, pdl), dec),
+      trigger: `Preis hält ${above ? 'über' : 'unter'} ${fmt(lvl)}`, invalidation: `Preis zurück ${above ? 'unter' : 'über'} ${fmt(lvl)}`,
+      text: `Hält der Preis ${above ? 'über' : 'unter'} ${fmt(lvl)}, ist ${fmt(target)} (Vortagesschluss ${above ? '+' : '−'} 1 ATR) das Tagesziel.` };
+    const ret = { name: 'Rückkehr in die Vortagesrange', p: r2(pR * 100), from: r2(pdl, dec), to: r2(pdh, dec),
+      trigger: `Preis zurück ${above ? 'unter' : 'über'} ${fmt(lvl)}`, invalidation: `Preis ${above ? 'über' : 'unter'} ${fmt(target)}`,
+      text: `Ausbruch verpufft: Schluss zwischen ${fmt(pdl)} und ${fmt(pdh)}, Vortagesschluss ${fmt(pdc)} als Magnet.` };
+    const rev = { name: above ? 'Volle Umkehr nach unten' : 'Volle Umkehr nach oben', p: r2(pV * 100), from: r2(above ? pdl - atr * 0.4 : pdh, dec), to: r2(above ? pdl : pdh + atr * 0.4, dec),
+      trigger: `Preis ${above ? 'unter' : 'über'} ${fmt(above ? pdl : pdh)}`, invalidation: `Preis ${above ? 'über' : 'unter'} ${fmt(pdc)}`,
+      text: `Fehlausbruch mit Durchlauf zur Gegenseite: Schluss ${above ? 'unter' : 'über'} ${fmt(above ? pdl : pdh)}.` };
+    if (above) { up = cont; dn = rev; } else { dn = cont; up = rev; } rg = ret;
+    note = `Expansion ${above ? 'über das Vortageshoch' : 'unter das Vortagestief'} ${fmt(lvl)}.`;
+  } else {
+    // ---- Innerhalb der Vortagesrange: keine Richtung (Backtest: Lean unter Münzwurf), Range als Basis, Ausbruch beidseitig gleich
+    let pRange = P.rangeBase; if (used > 0.8) pRange += 0.08; pRange += 0.12 * evtSoon; pRange = clamp(pRange, 0.25, 0.7);
+    let pUp = 0.5 + (Math.abs(day) > 0.8 ? Math.sign(day) * 0.04 : 0); // nur ein sehr klarer Tages-Score neigt minimal
+    const [pR, pU, pD] = stretch([pRange, (1 - pRange) * pUp, (1 - pRange) * (1 - pUp)]);
+    up = { name: 'Ausbruch nach oben', p: r2(pU * 100), from: r2(pdh, dec), to: r2(pdh + atr * 0.6, dec), trigger: `Preis über ${fmt(pdh)}`, invalidation: `Preis zurück unter ${fmt(pdh)}`, text: `Bruch über ${fmt(pdh)} öffnet ${fmt(pdh)}–${fmt(pdh + atr * 0.6)} (0,6 ATR).` };
+    dn = { name: 'Ausbruch nach unten', p: r2(pD * 100), from: r2(pdl - atr * 0.6, dec), to: r2(pdl, dec), trigger: `Preis unter ${fmt(pdl)}`, invalidation: `Preis zurück über ${fmt(pdl)}`, text: `Bruch unter ${fmt(pdl)} öffnet ${fmt(pdl - atr * 0.6)}–${fmt(pdl)} (0,6 ATR).` };
+    rg = { name: 'Range', p: r2(pR * 100), from: r2(pdl, dec), to: r2(pdh, dec), trigger: `Preis bleibt zwischen ${fmt(pdl)} und ${fmt(pdh)}`, invalidation: 'Schluss außerhalb der Vortagesrange',
+      text: `Seitwärts zwischen ${fmt(pdl)} und ${fmt(pdh)}; ${fmt(pdc)} (Vortagesschluss) und ${fmt(wo)} (Wochen-Open) als Magneten. Keine bevorzugte Seite.` };
+    note = `Preis innerhalb der Vortagesrange (${Math.round((ohlc.posInPrevRangePct ?? 50))} % von unten).`;
+  }
   const scen = [up, dn, rg].sort((x, y) => y.p - x.p); const base = scen[0];
   const evTxt = eventsToday.length ? ` Events heute: ${eventsToday.map(e => `${e.title} ${e.timeBerlin}`).join(', ')} – davor eher Range, Richtung entscheidet sich am Event.` : '';
   const atrTxt = ohlc.atrUsedPct != null ? ` Bereits ${ohlc.atrUsedPct} % der Tages-ATR (${fmt(atr)}) verbraucht${used > 0.8 ? ' – Tagesrange ist weitgehend ausgeschöpft' : ''}.` : '';
   return { asOf: new Date().toISOString().slice(0, 10), price: r2(px, dec), atr14: r2(atr, dec), atrUsedPct: ohlc.atrUsedPct ?? null, regime: ohlc.regime,
-    range: { from: r2(rangeLo, dec), to: r2(rangeHi, dec) }, prevHigh: r2(pdh, dec), prevLow: r2(pdl, dec), prevClose: r2(pdc, dec), weekOpen: r2(wo, dec),
-    eventsToday, scenarios: scen, base: base.name,
+    range: { from: r2(above || below ? Math.min(px, pdl) : pdl, dec), to: r2(above || below ? Math.max(px, pdh) : pdh, dec) }, prevHigh: r2(pdh, dec), prevLow: r2(pdl, dec), prevClose: r2(pdc, dec), weekOpen: r2(wo, dec),
+    eventsToday, scenarios: scen, base: base.name, params: P,
     summary: `${label} heute: ${note} Basis „${base.name}“ (${base.p} %). ${base.text}${atrTxt}${evTxt}`,
-    disclaimer: 'Modellbasiertes Tagesszenario, unkalibriert. Beobachtung, keine Anlageberatung.' };
+    disclaimer: 'Modellbasiertes Tagesszenario; Parameter aus Backtest Dez 2025–Okt 2026 (in-sample). Beobachtung, keine Anlageberatung.' };
 }
 
 // Events der nächsten ~20 h (High/Medium USD aus FF + Mega-Cap-Earnings) für das Tagesszenario
