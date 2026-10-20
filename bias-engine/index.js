@@ -4,7 +4,7 @@
 import * as S from './sources.js';
 import * as Q from './scoring.js';
 import { enrichCalendarActuals, loggedEvents } from './calendar-actuals.js';
-import { buildScenarios, eventRiskFromCalendar } from './scenarios.js';
+import { buildScenarios, eventRiskFromCalendar, buildTodayScenario, eventsForToday } from './scenarios.js';
 import { computeIntraday, upcomingUsd } from './intraday.js';
 export { enrichCalendarActuals };
 
@@ -94,9 +94,16 @@ export async function computeBias() {
   gold.scenarios = buildScenarios(gold, d.gold.closes, { eventRisk, label: 'Gold' });
   nas.scenarios  = buildScenarios(nas,  d.nas.closes,  { eventRisk: Math.max(eventRisk, earnRisk), label: 'NAS100' }); // Mega-Cap-Earnings zählen für NAS wie Makro-Events
   btc.scenarios  = buildScenarios(btc,  d.btc.closes,  { eventRisk: Math.max(eventRisk * 0.6, earnRisk * 0.5), label: 'Bitcoin' }); // BTC reagiert schwächer auf US-Makro
+
+  // ---- Tagesszenario (heute) aus PDH/PDL/ATR + Events der nächsten 20 h ----
+  const evToday = eventsForToday(d.ff?.events || [], intra.earnings?.upcoming || []);
+  gold.today = buildTodayScenario(gold, ohlc.GOLD, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'Gold' });
+  nas.today  = buildTodayScenario(nas,  ohlc.NAS100, { eventsToday: evToday, label: 'NAS100' });
+  btc.today  = buildTodayScenario(btc,  ohlc.BTC, { eventsToday: evToday.filter(e => /-Zahlen$/.test(e.title) ? e.weight >= 0.9 : true), label: 'Bitcoin' });
   // DXY: keine Retail-Level übergeben – die sind EURUSD-Kurse und würden als DXY-Support fehlinterpretiert
   const dxyAsset = { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct, crowd: { ...dxyParts.crowd, trapped: null, levels: null } }, levels: null, regime: dxyStruct?.regime ?? null };
   const dxyScen = buildScenarios(dxyAsset, d.dxy.closes, { eventRisk, label: 'DXY' });
+  const dxyToday = buildTodayScenario(dxyAsset, ohlc.DXY, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'DXY' });
 
   // Vorwarnung für den Wochenhorizont: schweres Event (FOMC/CPI/NFP) in 5–10 Tagen liegt außerhalb des 5-Tage-eventRisk
   const heavyAhead = (intra.upcoming || []).filter(u => u.heavy);
@@ -104,7 +111,8 @@ export async function computeBias() {
 
   return {
     generatedAt: new Date().toISOString(),
-    dxy: { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct }, surprise, rates, vix: vixNow, scenarios: dxyScen },
+    dxy: { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct }, surprise, rates, vix: vixNow, scenarios: dxyScen, today: dxyToday },
+    eventsToday: evToday,
     eventRisk, earningsRisk: earnRisk, weekWarning,
     intraday: { rates: intra.rates, oil: intra.oil, fedFunds: intra.fedFunds, earnings: intra.earnings, upcoming: intra.upcoming, generatedAt: intra.generatedAt, error: intra.error ?? null },
     assets: { GOLD: gold, NAS100: nas, BTC: btc },
@@ -148,7 +156,8 @@ function horizonsFor(parts, structure) {
 import { appendFile } from 'node:fs/promises';
 export async function logBias(result, path = process.env.BIAS_LOG_PATH || './bias-log.jsonl') {
   // Horizont-Scores + Szenarien (Basisszenario, Wahrscheinlichkeiten, Level) für die spätere Trefferquote
-  const sc = v => v?.scenarios ? { price: v.scenarios.price, base: v.scenarios.base, p: Object.fromEntries(v.scenarios.scenarios.map(s => [s.name, s.p])), support: v.scenarios.support, resistance: v.scenarios.resistance } : null;
+  const sc = v => v?.scenarios ? { price: v.scenarios.price, base: v.scenarios.base, p: Object.fromEntries(v.scenarios.scenarios.map(s => [s.name, s.p])), support: v.scenarios.support, resistance: v.scenarios.resistance,
+    today: v.today ? { base: v.today.base, p: Object.fromEntries(v.today.scenarios.map(s => [s.name, s.p])), range: v.today.range, atr: v.today.atr14 } : null } : null;
   const row = { t: result.generatedAt, eventRisk: result.eventRisk, dxy: { ...result.dxy.horizons, scen: sc(result.dxy) },
     ...Object.fromEntries(Object.entries(result.assets).map(([k, v]) => [k, { ...v.horizons, scen: sc(v) }])) };
   try { await appendFile(path, JSON.stringify(row) + '\n'); } catch (e) { console.warn('bias log failed', e.message); }
