@@ -172,6 +172,17 @@ export function registerBiasRoutes(app) {
   app.get('/bias/daily', async (req, res) => { try { res.json(legacyDailyView(await get(req.query.fresh === '1'))); } catch (e) { res.status(500).json({ error: e.message }); } });
   // Nur die Intraday-Schicht (Live-Zinsen, Öl, Fed-Funds, Earnings, Struktur) – zum Debuggen
   app.get('/bias/intraday', async (req, res) => { try { res.json(await computeIntraday({ fredFn: S.fred })); } catch (e) { res.status(500).json({ error: e.message }); } });
+  // Backtest des Tagesszenarios: /bias/backtest?asset=GOLD|NAS100|BTC|DXY|ALL&days=120&hour=9&html=1  (6h-Cache pro Parametersatz)
+  const btCache = new Map();
+  app.get('/bias/backtest', async (req, res) => {
+    try {
+      const { backtestAsset, backtestAll, backtestHtml } = await import('./backtest.js');
+      const asset = (req.query.asset || 'ALL').toUpperCase(), days = Math.min(400, +req.query.days || 120), hourUtc = Math.min(23, Math.max(0, +req.query.hour || 9));
+      const key = `${asset}:${days}:${hourUtc}`; let v = btCache.get(key);
+      if (!v || Date.now() - v.t > 6 * 3600e3) { const out = asset === 'ALL' ? await backtestAll({ days, hourUtc }) : { [asset]: await backtestAsset(asset, { days, hourUtc }) }; v = { t: Date.now(), out }; btCache.set(key, v); }
+      if (req.query.html === '1') { res.type('html').send(backtestHtml(v.out)); } else res.json(v.out);
+    } catch (e) { res.status(500).json({ error: e.message }); }
+  });
   app.get('/bias/v2/:asset', async (req, res) => {
     try { const r = await get(); const a = req.params.asset.toUpperCase();
       if (a === 'DXY') return res.json(r.dxy); const x = r.assets[a]; if (!x) return res.status(404).json({ error: 'asset unbekannt' }); res.json(x); }
