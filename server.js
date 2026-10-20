@@ -1569,7 +1569,10 @@ async function biasScoreBtc() {
   return biasBuild('BTCUSD', f);
 }
 
-app.get('/bias/daily', async (req, res) => {
+// Seit Okt. 2026: /bias/daily kommt aus der Bias-Engine v2 (bias-engine/index.js, legacyDailyView) —
+// dieselbe Rechnung wie /bias/v2, damit Hero-Karten und Trade-Richtung nie widersprechen.
+// Die alte Vier-Faktoren-Rechnung bleibt nur zum Vergleich unter /bias/daily-legacy erreichbar.
+app.get('/bias/daily-legacy', async (req, res) => {
   try {
     const now = Date.now();
     const wanted = (req.query.instrument || '').toUpperCase();
