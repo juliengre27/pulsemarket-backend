@@ -35,6 +35,53 @@ export function yahooDaily(symbol, range = '1y') {
   });
 }
 
+// ---------- Yahoo: OHLC-Kerzen (Tages- oder Stundenbasis) für Intraday-Struktur und Live-Zinsen ----------
+// Liefert {symbol, bars:[{t,o,h,l,c}], last, prevClose, meta}. interval '1d' | '1h' | '15m', range z. B. '3mo' | '5d'.
+export function yahooChart(symbol, interval = '1d', range = '3mo') {
+  const ttl = interval === '1d' ? 15 * 60e3 : 5 * 60e3;
+  return cached(`yc:${symbol}:${interval}:${range}`, ttl, async () => {
+    const u = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
+    const r = await fetch(u, { headers: { 'User-Agent': 'Mozilla/5.0 PulseMarket' } });
+    if (!r.ok) throw new Error(`yahoo ${symbol} ${r.status}`);
+    const j = await r.json();
+    const res = j.chart?.result?.[0]; if (!res) throw new Error(`yahoo ${symbol}: ${j.chart?.error?.description || 'leer'}`);
+    const q = res.indicators.quote[0]; const bars = [];
+    (res.timestamp || []).forEach((t, i) => { if (q.close[i] != null && q.high[i] != null && q.low[i] != null) bars.push({ t: t * 1000, o: q.open[i] ?? q.close[i], h: q.high[i], l: q.low[i], c: q.close[i] }); });
+    if (!bars.length) throw new Error(`yahoo ${symbol}: keine Kerzen`);
+    const m = res.meta || {};
+    return { symbol, bars, last: m.regularMarketPrice ?? bars.at(-1).c, prevClose: m.chartPreviousClose ?? m.previousClose ?? null, meta: { currency: m.currency, exchangeTz: m.exchangeTimezoneName, marketTime: m.regularMarketTime ? m.regularMarketTime * 1000 : null } };
+  });
+}
+
+// ---------- Forex-Factory-Kalender der NÄCHSTEN Woche (FOMC/CPI/NFP-Vorwarnung für den Wochenhorizont) ----------
+const FF_NEXT_CACHE = process.env.FF_NEXT_CACHE_PATH || (process.env.BIAS_LOG_PATH ? process.env.BIAS_LOG_PATH.replace(/[^/]*$/, 'ff-next.json') : './ff-next.json');
+export function ffNextWeek() {
+  return cached('ff:next', 6 * H, async () => {
+    try { const c = JSON.parse(await readFile(FF_NEXT_CACHE, 'utf8')); if (Date.now() - c.t < 6 * H) return c.v; } catch {}
+    const r = await fetch('https://nfs.faireconomy.media/ff_calendar_nextweek.json', { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36', Accept: 'application/json' } });
+    if (!r.ok) {
+      try { const c = JSON.parse(await readFile(FF_NEXT_CACHE, 'utf8')); if (Date.now() - c.t < 7 * D) return { ...c.v, note: `forexfactory nextweek ${r.status}, Disk-Kopie` }; } catch {}
+      throw new Error(`forexfactory nextweek ${r.status}`);
+    }
+    const raw = await r.json();
+    const v = { events: raw.map(x => ({ title: x.title, country: x.country, impact: x.impact, timestamp: x.date ? Math.floor(new Date(x.date).getTime() / 1000) : null })) };
+    _wf(FF_NEXT_CACHE, JSON.stringify({ t: Date.now(), v })).catch(() => {});
+    return v;
+  });
+}
+
+// ---------- Finnhub Earnings-Kalender (Free-Tier, anders als der Economic Calendar) ----------
+export function finnhubEarnings(from, to) {
+  return cached(`fhE:${from}:${to}`, 6 * H, async () => {
+    const key = process.env.FINNHUB_API_KEY;
+    if (!key) throw new Error('FINNHUB_API_KEY fehlt');
+    const r = await fetch(`https://finnhub.io/api/v1/calendar/earnings?from=${from}&to=${to}&token=${key}`);
+    if (!r.ok) throw new Error(`finnhub earnings ${r.status}`);
+    const j = await r.json();
+    return { events: (j.earningsCalendar || []).map(e => ({ symbol: e.symbol, date: e.date, hour: e.hour || null, epsEstimate: e.epsEstimate ?? null })) };
+  });
+}
+
 // ---------- FRED ----------
 export function fred(series, limit = 300) {
   return cached(`fred:${series}`, 6 * H, async () => {

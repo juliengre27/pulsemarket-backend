@@ -5,6 +5,7 @@ import * as S from './sources.js';
 import * as Q from './scoring.js';
 import { enrichCalendarActuals, loggedEvents } from './calendar-actuals.js';
 import { buildScenarios, eventRiskFromCalendar } from './scenarios.js';
+import { computeIntraday, upcomingUsd } from './intraday.js';
 export { enrichCalendarActuals };
 
 const HORIZONS = ['daily', 'weekly', 'monthly'];
@@ -32,9 +33,15 @@ async function loadAll() {
 }
 
 export async function computeBias() {
-  const d = await loadAll();
+  const [d, intra] = await Promise.all([loadAll(), computeIntraday({ fredFn: S.fred }).catch(e => ({ error: e.message, rates: { score: 0, ok: false }, oil: { score: 0, ok: false }, fedFunds: { ok: false, score: 0 }, earnings: { ok: false, risk5d: 0, upcoming: [] }, structure: {}, upcoming: [], health: {} }))]);
+  // computeIntraday lief parallel ohne den Wochenkalender → 10-Tage-Vorschau jetzt mit beiden Wochen rechnen
+  intra.upcoming = upcomingUsd(d.ff?.events || [], intra.ffNextEvents || []);
   const surprise = Q.surpriseIndex(d.events);
-  const rates = Q.ratesScore({ dgs2: d.dgs2.obs, dfii10: d.dfii10.obs, dgs10: d.dgs10.obs });
+  const ratesFred = Q.ratesScore({ dgs2: d.dgs2.obs, dfii10: d.dfii10.obs, dgs10: d.dgs10.obs });
+  // Zinsscore: FRED (Tagesverzögerung, 20d-Trend) 55 % · Live-Yahoo (heute/5d) 35 % · Fed-Funds-Pfad 10 %
+  const rates = { ...ratesFred, fred: ratesFred.score, live: intra.rates?.ok ? intra.rates.score : null, fedPath: intra.fedFunds?.ok ? intra.fedFunds.score : null,
+    score: Q.clamp(ratesFred.score * (intra.rates?.ok ? 0.55 : 0.9) + (intra.rates?.ok ? intra.rates.score * 0.35 : 0) + (intra.fedFunds?.ok ? intra.fedFunds.score * 0.1 : 0)) };
+  const oil = intra.oil?.ok ? intra.oil.score : 0;
   const vixNow = d.vix.obs?.at(-1)?.v ?? null;
 
   // ---- DXY: Treiber-Layer ----
@@ -45,7 +52,8 @@ export async function computeBias() {
     positioning: Q.cotScore(usdRows),
     crowd: Q.crowdScore(d.mfb?.EURUSD ? { ...d.mfb.EURUSD, longPercentage: 100 - +d.mfb.EURUSD.longPercentage, avgLongPrice: d.mfb.EURUSD.avgShortPrice, avgShortPrice: d.mfb.EURUSD.avgLongPrice } : null), // EURUSD-Longs = USD-Shorts (Entry-Preise sind EURUSD-Kurse)
   };
-  const dxyOut = horizonsFor(dxyParts, null);
+  const dxyStruct = intra.structure?.DXY ? { score: intra.structure.DXY.score, regime: intra.structure.DXY.regime, ohlc: intra.structure.DXY } : null;
+  const dxyOut = horizonsFor(dxyParts, dxyStruct);
 
   // ---- Assets ----
   const link = (h, sign) => sign * dxyOut[h].score; // DXY-Kopplung
@@ -63,32 +71,70 @@ export async function computeBias() {
 
   // Makro-Wirkung pro Asset: Inflationsüberraschung nach oben = hawkish = schlecht für Gold/NAS/BTC;
   // Wachstumsüberraschung nach oben = gut für NAS, neutral-leicht negativ für Gold.
+  // Öl: Inflationsimpuls → Yields hoch → schlecht für NAS/BTC; Gold netto leicht positiv (Hedge > Zinseffekt, solange Realzinsen nicht mitziehen).
   const infl = Q.clamp(surprise.inflationImpulse / 2), grow = Q.clamp(surprise.growthImpulse / 2);
-  const goldMacro = Q.clamp(-infl * 0.5 - rates.score * 0.5 - grow * 0.2);
-  const nasMacro  = Q.clamp(-infl * 0.5 - rates.score * 0.3 + grow * 0.5 - (vixNow > 25 ? 0.5 : 0));
-  const btcMacro  = Q.clamp(-infl * 0.4 - rates.score * 0.4 + grow * 0.3);
+  const goldMacro = Q.clamp(-infl * 0.5 - rates.score * 0.5 - grow * 0.2 + oil * 0.15);
+  const nasMacro  = Q.clamp(-infl * 0.5 - rates.score * 0.3 + grow * 0.5 - (vixNow > 25 ? 0.5 : 0) - oil * 0.3);
+  const btcMacro  = Q.clamp(-infl * 0.4 - rates.score * 0.4 + grow * 0.3 - oil * 0.2);
 
-  const gold = build('GOLD', d.gold.closes, d.cot.GOLD?.rows, null, Q.crowdScore(d.mfb?.XAUUSD, d.gold.closes?.at(-1)), goldMacro, -1);
-  const nas  = build('NAS100', d.nas.closes, d.cot.NAS?.rows, Q.structureNas(d.gex, vixNow), null, nasMacro, -0.5);
-  const btc  = build('BTC', d.btc.closes, d.cot.BTC?.rows, Q.structureBtc(d.deribit, d.cg, d.btc.closes?.at(-1)), null, btcMacro, -0.7);
+  // Struktur: Options-/Gamma-Struktur (falls vorhanden) + Intraday-OHLC-Struktur (PDH/PDL, Wochen-Open, ATR). Gold hatte bisher gar keine.
+  const ohlc = intra.structure || {};
+  const mergeStruct = (base, k, w = 0.6) => {
+    const o = ohlc[k]; if (!o) return base;
+    if (!base) return { score: o.score, regime: o.regime, levels: o.levels, ohlc: o };
+    return { ...base, score: Q.clamp((base.score ?? 0) + o.score * w), levels: { ...(base.levels || {}), ...o.levels }, ohlc: o };
+  };
+  const gold = build('GOLD', d.gold.closes, d.cot.GOLD?.rows, mergeStruct(null, 'GOLD', 1), Q.crowdScore(d.mfb?.XAUUSD, d.gold.closes?.at(-1)), goldMacro, -1);
+  const nas  = build('NAS100', d.nas.closes, d.cot.NAS?.rows, mergeStruct(Q.structureNas(d.gex, vixNow), 'NAS100'), null, nasMacro, -0.5);
+  const btc  = build('BTC', d.btc.closes, d.cot.BTC?.rows, mergeStruct(Q.structureBtc(d.deribit, d.cg, d.btc.closes?.at(-1)), 'BTC'), null, btcMacro, -0.7);
 
   // ---- Szenarien für die nächsten ~5 Handelstage ----
   const eventRisk = eventRiskFromCalendar(d.ff?.events || []);
+  const earnRisk = intra.earnings?.risk5d ?? 0;
   gold.scenarios = buildScenarios(gold, d.gold.closes, { eventRisk, label: 'Gold' });
-  nas.scenarios  = buildScenarios(nas,  d.nas.closes,  { eventRisk, label: 'NAS100' });
-  btc.scenarios  = buildScenarios(btc,  d.btc.closes,  { eventRisk: eventRisk * 0.6, label: 'Bitcoin' }); // BTC reagiert schwächer auf US-Makro
+  nas.scenarios  = buildScenarios(nas,  d.nas.closes,  { eventRisk: Math.max(eventRisk, earnRisk), label: 'NAS100' }); // Mega-Cap-Earnings zählen für NAS wie Makro-Events
+  btc.scenarios  = buildScenarios(btc,  d.btc.closes,  { eventRisk: Math.max(eventRisk * 0.6, earnRisk * 0.5), label: 'Bitcoin' }); // BTC reagiert schwächer auf US-Makro
   // DXY: keine Retail-Level übergeben – die sind EURUSD-Kurse und würden als DXY-Support fehlinterpretiert
-  const dxyAsset = { horizons: dxyOut, components: { ...dxyParts, crowd: { ...dxyParts.crowd, trapped: null, levels: null } }, levels: null, regime: null };
+  const dxyAsset = { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct, crowd: { ...dxyParts.crowd, trapped: null, levels: null } }, levels: null, regime: dxyStruct?.regime ?? null };
   const dxyScen = buildScenarios(dxyAsset, d.dxy.closes, { eventRisk, label: 'DXY' });
+
+  // Vorwarnung für den Wochenhorizont: schweres Event (FOMC/CPI/NFP) in 5–10 Tagen liegt außerhalb des 5-Tage-eventRisk
+  const heavyAhead = (intra.upcoming || []).filter(u => u.heavy);
+  const weekWarning = heavyAhead.length ? `Schwere Events voraus: ${heavyAhead.slice(0, 3).map(u => `${u.title} in ${u.daysTo} Tagen`).join(', ')}. Wochen-Bias vor dem Termin weniger belastbar.` : null;
 
   return {
     generatedAt: new Date().toISOString(),
-    dxy: { horizons: dxyOut, components: dxyParts, surprise, rates, vix: vixNow, scenarios: dxyScen },
-    eventRisk,
+    dxy: { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct }, surprise, rates, vix: vixNow, scenarios: dxyScen },
+    eventRisk, earningsRisk: earnRisk, weekWarning,
+    intraday: { rates: intra.rates, oil: intra.oil, fedFunds: intra.fedFunds, earnings: intra.earnings, upcoming: intra.upcoming, generatedAt: intra.generatedAt, error: intra.error ?? null },
     assets: { GOLD: gold, NAS100: nas, BTC: btc },
-    dataHealth: Object.fromEntries(Object.entries(d.sources).map(([k, v]) => [k, { stale: !!v?.stale, error: v?.error ?? null, fetchedAt: v?.fetchedAt ?? null }])),
+    dataHealth: { ...Object.fromEntries(Object.entries(d.sources).map(([k, v]) => [k, { stale: !!v?.stale, error: v?.error ?? null, fetchedAt: v?.fetchedAt ?? null }])), ...(intra.health || {}) },
     disclaimer: 'Beobachtung, keine Anlageberatung. Positionierungsdaten (COT) haben 3 Tage Verzögerung.',
   };
+}
+
+// ---- /bias/daily: Kompatibilitäts-View aus v2 (ersetzt die alte Vier-Faktoren-Rechnung in server.js) ----
+// Gleiche Form wie früher (instrument, bias, arrow, score, factors), aber dieselbe Rechnung wie v2 → kein Widerspruch mehr.
+export function legacyDailyView(v2) {
+  const map = { XAUUSD: v2.assets.GOLD, NAS100: v2.assets.NAS100, BTCUSD: v2.assets.BTC };
+  const lbl = s => s > 0.3 ? 'LONG' : s < -0.3 ? 'SHORT' : 'NEUTRAL';
+  const arrow = s => s > 0.3 ? '▲' : s < -0.3 ? '▼' : '·';
+  const f = (name, c, note) => c == null ? null : { name, ok: true, value: (+c).toFixed(2), points: +(+c).toFixed(1), note };
+  const out = {};
+  for (const [k, a] of Object.entries(map)) {
+    const day = a.horizons.daily.score, c = a.components;
+    const factors = [f('Trend (1M/3M, SMA50/200)', c.trend?.score, c.trend?.aboveSma200 ? 'über SMA200' : 'unter SMA200'),
+      f('Makro (Überraschung + Zinsen + Öl)', c.macro?.score, 'Zinsen/Inflationsimpuls'),
+      f('Struktur (Optionen + Intraday-Level)', c.structure?.score, c.structure?.regime ?? ''),
+      f('Positionierung (COT)', c.positioning?.score, c.positioning?.extreme ? 'COT-Extrem' : `Perzentil ${c.positioning?.percentile3y}`),
+      f('Retail-Crowd', c.crowd?.score, c.crowd?.trapped ? `${c.crowd.trapped} gefangen` : 'neutral')].filter(Boolean);
+    out[k] = { instrument: k, bias: lbl(day), arrow: arrow(day), score: +day.toFixed(2), confidence: 1, factors,
+      comment: `Tages-Bias aus /bias/v2 (${a.horizons.daily.label}). Woche: ${a.horizons.weekly.label}, Monat: ${a.horizons.monthly.label}.` };
+  }
+  // EURUSD ≈ −DXY (Tageshorizont)
+  const e = -v2.dxy.horizons.daily.score;
+  out.EURUSD = { instrument: 'EURUSD', bias: lbl(e), arrow: arrow(e), score: +e.toFixed(2), confidence: 1, factors: [f('DXY-Bias (invertiert)', e, v2.dxy.horizons.daily.label)].filter(Boolean), comment: 'Abgeleitet aus dem DXY-Treiber-Layer von /bias/v2.' };
+  return { source: 'v2', asOf: v2.generatedAt, disclaimer: v2.disclaimer, instruments: out, weekWarning: v2.weekWarning ?? null };
 }
 function horizonsFor(parts, structure) {
   const out = {};
@@ -113,6 +159,10 @@ export function registerBiasRoutes(app) {
   const get = async (fresh = false) => { if (fresh || !last || Date.now() - lastT > 15 * 60e3) { last = await computeBias(); lastT = Date.now(); logBias(last); } return last; };
   // ?fresh=1 umgeht den 15-Minuten-Cache (nur zum Testen; Quellen-Caches in sources.js bleiben aktiv)
   app.get('/bias/v2', async (req, res) => { try { res.json(await get(req.query.fresh === '1')); } catch (e) { res.status(500).json({ error: e.message }); } });
+  // /bias/daily aus v2 ableiten (alte Route in server.js heißt jetzt /bias/daily-legacy)
+  app.get('/bias/daily', async (req, res) => { try { res.json(legacyDailyView(await get(req.query.fresh === '1'))); } catch (e) { res.status(500).json({ error: e.message }); } });
+  // Nur die Intraday-Schicht (Live-Zinsen, Öl, Fed-Funds, Earnings, Struktur) – zum Debuggen
+  app.get('/bias/intraday', async (req, res) => { try { res.json(await computeIntraday({ fredFn: S.fred })); } catch (e) { res.status(500).json({ error: e.message }); } });
   app.get('/bias/v2/:asset', async (req, res) => {
     try { const r = await get(); const a = req.params.asset.toUpperCase();
       if (a === 'DXY') return res.json(r.dxy); const x = r.assets[a]; if (!x) return res.status(404).json({ error: 'asset unbekannt' }); res.json(x); }
