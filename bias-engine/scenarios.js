@@ -83,73 +83,82 @@ export function buildScenarios(a, closes, { eventRisk = 0, label = '' } = {}) {
 }
 
 // ---------- TAGESSZENARIO (heute, Horizont bis zum nächsten Tagesschluss) ----------
-// Arbeitet mit Vortages-High/Low/Close, ATR(14) und Session-Range aus intraday.js – nicht mit Wochen-Swings.
-// Trigger sind Preislevel (nicht Tagesschlüsse), weil intraday gehandelt wird.
-//
-// Parameter aus dem Backtest (≈850 Tage, Dez 2025–Okt 2026, Entscheidung 09:00 UTC) – siehe /bias/backtest:
-//   • innerhalb der Vortagesrange gibt es KEINE Richtung (Lean 43–52 % über alle vier Assets) → nur Range + Ausbruchslevel
-//   • Expansion läuft bei Gold/DXY durch (Lean ~60 %), bei NAS/BTC nicht (50 %) → Fortsetzungs-Bonus nur für Gold/DXY
-//   • Range-Basis: NAS trendet intraday (Range nur 45 % getroffen) → niedrigere Range-Wahrscheinlichkeit als Gold/BTC/DXY
-//   • Modell war unterkonfident (44 % gesagt, 53–61 % eingetreten) → Streckung; NAS war kalibriert → keine Streckung
-//   Streckung und Boni sind In-Sample – der Beweis kommt aus dem Live-Log (bias-log.jsonl), nicht aus dem Backtest.
-export const TODAY_PARAMS = {
-  GOLD:   { contBonus: 0.10, rangeBase: 0.50, stretch: 1.25 },
-  DXY:    { contBonus: 0.10, rangeBase: 0.50, stretch: 1.25 },
-  BTC:    { contBonus: 0.02, rangeBase: 0.50, stretch: 1.20 },
-  NAS100: { contBonus: 0.00, rangeBase: 0.36, stretch: 1.00 },
-  DEFAULT:{ contBonus: 0.04, rangeBase: 0.45, stretch: 1.10 },
-};
-export function buildTodayScenario(a, ohlc, { eventsToday = [], label = '', asset = null } = {}) {
+// BACKTEST-ERGEBNIS (≈860 Tage, Dez 2025–Okt 2026, 4 Assets, Entscheidung 09:00 UTC, siehe /bias/backtest):
+//   Handgebaute Wahrscheinlichkeiten (Trend-Lean, Fortsetzungs-Boni, Range-Basen) schlugen einen Random Walk mit gleicher
+//   Volatilität bei KEINEM Asset (Brier Modell 0,48–0,62 vs. Random Walk 0,45–0,55; Richtungs-Lean 48–52 %).
+//   Deshalb: Wahrscheinlichkeiten kommen jetzt aus einer Monte-Carlo-Simulation (Stundenvola × Restzeit bis Tagesende).
+//   Das ist kalibriert per Konstruktion und hat keinen Parameter, den man überanpassen kann. Der Nutzwert liegt in den
+//   Leveln (Vortageshoch/-tief, ATR-Ziele, Magneten), nicht in einer Richtungsprognose.
+//   Der Tages-Score (Makro/COT/Crowd) kann als Drift eingehen – DRIFT_K startet bei 0 und wird erst angehoben, wenn das
+//   Live-Log (bias-log.jsonl) über ≥60 Tage zeigt, dass Tage mit |Score| > 1 häufiger in Score-Richtung schließen als der RW sagt.
+export const DRIFT_K = 0;          // Drift pro Stunde = DRIFT_K × Tages-Score × σ_h  (0 = reiner Random Walk)
+export const MC_PATHS = 2000;
+
+let _seed = 1234567; const rnd = () => { _seed = (_seed * 1103515245 + 12345) % 2147483648; return _seed / 2147483648; };
+const gauss = () => { const u = Math.max(rnd(), 1e-12), v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+// Stundenvola aus Log-Returns der letzten n Stundenkerzen
+export function hourlySigma(bars, n = 20 * 24) {
+  const b = (bars || []).slice(-n); const rs = []; for (let i = 1; i < b.length; i++) if (b[i].c > 0 && b[i - 1].c > 0) rs.push(Math.log(b[i].c / b[i - 1].c));
+  if (rs.length < 20) return null;
+  const m = rs.reduce((a, x) => a + x, 0) / rs.length; return Math.sqrt(rs.reduce((a, x) => a + (x - m) ** 2, 0) / (rs.length - 1)) || null;
+}
+// Monte Carlo: Anteil der Pfade, die über PDH / unter PDL / dazwischen schließen
+export function monteCarloProbs(px, pdh, pdl, steps, sigmaH, { driftPerStep = 0, paths = MC_PATHS, seed = null } = {}) {
+  if (seed != null) _seed = seed;
+  let up = 0, dn = 0; const sqrtS = Math.sqrt(Math.max(1, steps));
+  for (let k = 0; k < paths; k++) { let lp = Math.log(px); for (let s = 0; s < steps; s++) lp += driftPerStep + gauss() * sigmaH; const c = Math.exp(lp); if (c > pdh) up++; else if (c < pdl) dn++; }
+  return { up: up / paths, dn: dn / paths, rg: 1 - (up + dn) / paths, sigmaRest: sigmaH * sqrtS };
+}
+const UTC_DAY_END = 23; // Tagesende wie im Backtest: UTC-Tag (Futures schließen 21/22 UTC, BTC läuft durch)
+
+export function buildTodayScenario(a, ohlc, { eventsToday = [], label = '', asset = null, hourlyBars = null, now = Date.now(), driftK = DRIFT_K, mcSeed = null } = {}) {
   if (!ohlc?.prevHigh || !ohlc?.prevLow || !ohlc?.atr14) return null;
-  const P = TODAY_PARAMS[asset || a?.asset] || TODAY_PARAMS.DEFAULT;
   const px = ohlc.price, pdh = ohlc.prevHigh, pdl = ohlc.prevLow, pdc = ohlc.prevClose, atr = ohlc.atr14, wo = ohlc.weekOpen;
   const dec = decimals(px); const fmt = v => r2(v, dec).toLocaleString('de-DE', { minimumFractionDigits: dec, maximumFractionDigits: dec });
   const day = a.horizons?.daily?.score ?? 0;
   const used = (ohlc.atrUsedPct ?? 0) / 100;
-  const evtSoon = eventsToday.length ? Math.max(...eventsToday.map(e => e.weight ?? 0.5)) : 0;
   const above = px > pdh, below = px < pdl;
-  const stretch = p => { const q = p.map(x => 1 / 3 + (x - 1 / 3) * P.stretch).map(x => clamp(x, 0.05, 0.9)); const s = q.reduce((t, x) => t + x, 0); return q.map(x => x / s); };
+  // Restzeit bis Tagesende in Stunden, Stundenvola; Fallback aus ATR (ATR ≈ 4,6 σ_h × √24 für einen Tag → grob)
+  const hoursLeft = Math.max(1, UTC_DAY_END - new Date(now).getUTCHours());
+  let sigmaH = hourlySigma(hourlyBars); let sigmaSrc = 'Stundenkerzen';
+  if (!sigmaH) { sigmaH = (atr / px) / 4.6; sigmaSrc = 'ATR-Näherung'; }
+  const driftPerStep = driftK * day * sigmaH;
+  const mc = monteCarloProbs(px, pdh, pdl, hoursLeft, sigmaH, { driftPerStep, seed: mcSeed });
+  const band = { lo: r2(px * Math.exp(-mc.sigmaRest), dec), hi: r2(px * Math.exp(mc.sigmaRest), dec) };
+  const evtSoon = eventsToday.length ? Math.max(...eventsToday.map(e => e.weight ?? 0.5)) : 0;
 
   let up, dn, rg, note;
   if (above || below) {
-    // ---- Expansion: Fortsetzung (Schluss jenseits des Ausbruchslevels) · Rückkehr (Schluss in der Vortagesrange) · Umkehr (Schluss jenseits der Gegenseite)
-    // Gleichwertige Bänder – die alte Definition (Rückkehr = zwischen Vortagestief und -schluss) traf nur in 4–9 % der Fälle.
-    let pCont = 0.5 + P.contBonus + clamp(day * (above ? 1 : -1), -2, 2) * 0.03;  // Tages-Score in Ausbruchsrichtung stützt
-    pCont = 0.5 + (pCont - 0.5) * (1 - 0.5 * evtSoon);
-    let pRet = 0.32 + 0.12 * evtSoon; let pRev = 1 - pCont - pRet; if (pRev < 0.06) { pRev = 0.06; pRet = 1 - pCont - pRev; }
-    const [pC, pR, pV] = stretch([pCont, pRet, pRev]);
     const lvl = above ? pdh : pdl;
     const target = above ? Math.max(pdc + atr, px + atr * 0.4) : Math.min(pdc - atr, px - atr * 0.4);
-    const cont = { name: above ? 'Fortsetzung nach oben' : 'Fortsetzung nach unten', p: r2(pC * 100), from: r2(above ? Math.max(px, pdh) : target, dec), to: r2(above ? target : Math.min(px, pdl), dec),
+    const cont = { name: above ? 'Fortsetzung nach oben' : 'Fortsetzung nach unten', p: r2((above ? mc.up : mc.dn) * 100), from: r2(above ? Math.max(px, pdh) : target, dec), to: r2(above ? target : Math.min(px, pdl), dec),
       trigger: `Preis hält ${above ? 'über' : 'unter'} ${fmt(lvl)}`, invalidation: `Preis zurück ${above ? 'unter' : 'über'} ${fmt(lvl)}`,
-      text: `Hält der Preis ${above ? 'über' : 'unter'} ${fmt(lvl)}, ist ${fmt(target)} (Vortagesschluss ${above ? '+' : '−'} 1 ATR) das Tagesziel.` };
-    const ret = { name: 'Rückkehr in die Vortagesrange', p: r2(pR * 100), from: r2(pdl, dec), to: r2(pdh, dec),
+      text: `Schluss ${above ? 'über' : 'unter'} ${fmt(lvl)}; ${fmt(target)} (Vortagesschluss ${above ? '+' : '−'} 1 ATR) ist das Tagesziel, falls es läuft.` };
+    const ret = { name: 'Rückkehr in die Vortagesrange', p: r2(mc.rg * 100), from: r2(pdl, dec), to: r2(pdh, dec),
       trigger: `Preis zurück ${above ? 'unter' : 'über'} ${fmt(lvl)}`, invalidation: `Preis ${above ? 'über' : 'unter'} ${fmt(target)}`,
       text: `Ausbruch verpufft: Schluss zwischen ${fmt(pdl)} und ${fmt(pdh)}, Vortagesschluss ${fmt(pdc)} als Magnet.` };
-    const rev = { name: above ? 'Volle Umkehr nach unten' : 'Volle Umkehr nach oben', p: r2(pV * 100), from: r2(above ? pdl - atr * 0.4 : pdh, dec), to: r2(above ? pdl : pdh + atr * 0.4, dec),
+    const rev = { name: above ? 'Volle Umkehr nach unten' : 'Volle Umkehr nach oben', p: r2((above ? mc.dn : mc.up) * 100), from: r2(above ? pdl - atr * 0.4 : pdh, dec), to: r2(above ? pdl : pdh + atr * 0.4, dec),
       trigger: `Preis ${above ? 'unter' : 'über'} ${fmt(above ? pdl : pdh)}`, invalidation: `Preis ${above ? 'über' : 'unter'} ${fmt(pdc)}`,
       text: `Fehlausbruch mit Durchlauf zur Gegenseite: Schluss ${above ? 'unter' : 'über'} ${fmt(above ? pdl : pdh)}.` };
     if (above) { up = cont; dn = rev; } else { dn = cont; up = rev; } rg = ret;
     note = `Expansion ${above ? 'über das Vortageshoch' : 'unter das Vortagestief'} ${fmt(lvl)}.`;
   } else {
-    // ---- Innerhalb der Vortagesrange: keine Richtung (Backtest: Lean unter Münzwurf), Range als Basis, Ausbruch beidseitig gleich
-    let pRange = P.rangeBase; if (used > 0.8) pRange += 0.08; pRange += 0.12 * evtSoon; pRange = clamp(pRange, 0.25, 0.7);
-    let pUp = 0.5 + (Math.abs(day) > 0.8 ? Math.sign(day) * 0.04 : 0); // nur ein sehr klarer Tages-Score neigt minimal
-    const [pR, pU, pD] = stretch([pRange, (1 - pRange) * pUp, (1 - pRange) * (1 - pUp)]);
-    up = { name: 'Ausbruch nach oben', p: r2(pU * 100), from: r2(pdh, dec), to: r2(pdh + atr * 0.6, dec), trigger: `Preis über ${fmt(pdh)}`, invalidation: `Preis zurück unter ${fmt(pdh)}`, text: `Bruch über ${fmt(pdh)} öffnet ${fmt(pdh)}–${fmt(pdh + atr * 0.6)} (0,6 ATR).` };
-    dn = { name: 'Ausbruch nach unten', p: r2(pD * 100), from: r2(pdl - atr * 0.6, dec), to: r2(pdl, dec), trigger: `Preis unter ${fmt(pdl)}`, invalidation: `Preis zurück über ${fmt(pdl)}`, text: `Bruch unter ${fmt(pdl)} öffnet ${fmt(pdl - atr * 0.6)}–${fmt(pdl)} (0,6 ATR).` };
-    rg = { name: 'Range', p: r2(pR * 100), from: r2(pdl, dec), to: r2(pdh, dec), trigger: `Preis bleibt zwischen ${fmt(pdl)} und ${fmt(pdh)}`, invalidation: 'Schluss außerhalb der Vortagesrange',
-      text: `Seitwärts zwischen ${fmt(pdl)} und ${fmt(pdh)}; ${fmt(pdc)} (Vortagesschluss) und ${fmt(wo)} (Wochen-Open) als Magneten. Keine bevorzugte Seite.` };
+    up = { name: 'Ausbruch nach oben', p: r2(mc.up * 100), from: r2(pdh, dec), to: r2(pdh + atr * 0.6, dec), trigger: `Preis über ${fmt(pdh)}`, invalidation: `Preis zurück unter ${fmt(pdh)}`, text: `Schluss über ${fmt(pdh)}; Zielzone ${fmt(pdh)}–${fmt(pdh + atr * 0.6)} (0,6 ATR).` };
+    dn = { name: 'Ausbruch nach unten', p: r2(mc.dn * 100), from: r2(pdl - atr * 0.6, dec), to: r2(pdl, dec), trigger: `Preis unter ${fmt(pdl)}`, invalidation: `Preis zurück über ${fmt(pdl)}`, text: `Schluss unter ${fmt(pdl)}; Zielzone ${fmt(pdl - atr * 0.6)}–${fmt(pdl)} (0,6 ATR).` };
+    rg = { name: 'Range', p: r2(mc.rg * 100), from: r2(pdl, dec), to: r2(pdh, dec), trigger: `Preis bleibt zwischen ${fmt(pdl)} und ${fmt(pdh)}`, invalidation: 'Schluss außerhalb der Vortagesrange',
+      text: `Schluss zwischen ${fmt(pdl)} und ${fmt(pdh)}; ${fmt(pdc)} (Vortagesschluss) und ${fmt(wo)} (Wochen-Open) als Magneten.` };
     note = `Preis innerhalb der Vortagesrange (${Math.round((ohlc.posInPrevRangePct ?? 50))} % von unten).`;
   }
   const scen = [up, dn, rg].sort((x, y) => y.p - x.p); const base = scen[0];
-  const evTxt = eventsToday.length ? ` Events heute: ${eventsToday.map(e => `${e.title} ${e.timeBerlin}`).join(', ')} – davor eher Range, Richtung entscheidet sich am Event.` : '';
-  const atrTxt = ohlc.atrUsedPct != null ? ` Bereits ${ohlc.atrUsedPct} % der Tages-ATR (${fmt(atr)}) verbraucht${used > 0.8 ? ' – Tagesrange ist weitgehend ausgeschöpft' : ''}.` : '';
-  return { asOf: new Date().toISOString().slice(0, 10), price: r2(px, dec), atr14: r2(atr, dec), atrUsedPct: ohlc.atrUsedPct ?? null, regime: ohlc.regime,
+  const evTxt = eventsToday.length ? ` Events heute: ${eventsToday.map(e => `${e.title} ${e.timeBerlin}`).join(', ')} – Vola-Sprung möglich, Simulation nutzt die normale Stundenvola.` : '';
+  const atrTxt = ohlc.atrUsedPct != null ? ` ${ohlc.atrUsedPct} % der Tages-ATR (${fmt(atr)}) verbraucht.` : '';
+  const sideTxt = Math.abs(mc.up - mc.dn) < 0.08 ? ' Keine bevorzugte Seite.' : mc.up > mc.dn ? ` Lage begünstigt die Oberseite (${r2(mc.up * 100)} % vs. ${r2(mc.dn * 100)} %) – reine Positionslogik, keine Richtungsprognose.` : ` Lage begünstigt die Unterseite (${r2(mc.dn * 100)} % vs. ${r2(mc.up * 100)} %) – reine Positionslogik, keine Richtungsprognose.`;
+  return { asOf: new Date(now).toISOString().slice(0, 10), price: r2(px, dec), atr14: r2(atr, dec), atrUsedPct: ohlc.atrUsedPct ?? null, regime: ohlc.regime,
     range: { from: r2(above || below ? Math.min(px, pdl) : pdl, dec), to: r2(above || below ? Math.max(px, pdh) : pdh, dec) }, prevHigh: r2(pdh, dec), prevLow: r2(pdl, dec), prevClose: r2(pdc, dec), weekOpen: r2(wo, dec),
-    eventsToday, scenarios: scen, base: base.name, params: P,
-    summary: `${label} heute: ${note} Basis „${base.name}“ (${base.p} %). ${base.text}${atrTxt}${evTxt}`,
-    disclaimer: 'Modellbasiertes Tagesszenario; Parameter aus Backtest Dez 2025–Okt 2026 (in-sample). Beobachtung, keine Anlageberatung.' };
+    model: { method: 'Monte Carlo', paths: MC_PATHS, hoursLeft, sigmaHourlyPct: r2(sigmaH * 100, 3), sigmaSource: sigmaSrc, sigmaRestPct: r2(mc.sigmaRest * 100, 2), band1sigma: band, driftK, dayScore: r2(day) },
+    eventsToday, scenarios: scen, base: base.name,
+    summary: `${label} heute: ${note} Vola-Szenario (${hoursLeft} h Restzeit, ±${r2(mc.sigmaRest * 100, 1)} % 1σ): ${base.name} ${base.p} %.${sideTxt}${atrTxt}${evTxt}`,
+    disclaimer: 'Monte-Carlo-Szenario aus Stundenvolatilität und Restzeit – kalibriert per Konstruktion, keine Richtungsprognose. Beobachtung, keine Anlageberatung.' };
 }
 
 // Events der nächsten ~20 h (High/Medium USD aus FF + Mega-Cap-Earnings) für das Tagesszenario

@@ -36,7 +36,7 @@ function randomWalkProbs(px, t, steps, sigmaH, paths = 400) {
 }
 function hourlySigma(bars, n = 20 * 24) { const b = bars.slice(-n); const rs = []; for (let i = 1; i < b.length; i++) rs.push(Math.log(b[i].c / b[i - 1].c)); const m = rs.reduce((a, x) => a + x, 0) / rs.length; return Math.sqrt(rs.reduce((a, x) => a + (x - m) ** 2, 0) / Math.max(1, rs.length - 1)) || 1e-6; }
 
-export async function backtestAsset(key, { days = 120, hourUtc = 9, fetchChart = S.yahooChart } = {}) {
+export async function backtestAsset(key, { days = 120, hourUtc = 9, driftK = undefined, fetchChart = S.yahooChart } = {}) {
   const sym = ASSETS[key]; if (!sym) throw new Error('asset unbekannt');
   const hc = await fetchChart(sym, '1h', days > 300 ? '2y' : '1y');
   if (!hc?.bars?.length) throw new Error(`keine Stundenkerzen für ${sym}: ${hc?.error || ''}`);
@@ -53,7 +53,8 @@ export async function backtestAsset(key, { days = 120, hourUtc = 9, fetchChart =
     const closes = daysAll.slice(0, i).map(d => d.c);
     const trend = Q.trendScore(closes); const dayScore = Q.clamp(trend.score * 0.5);
     const asset = { asset: key, horizons: { daily: { score: dayScore } }, components: { trend } };
-    const t = buildTodayScenario(asset, ohlc, { label: key, asset: key });
+    const hist = daysAll.slice(Math.max(0, i - 25), i).flatMap(d => d.bars).concat(before);
+    const t = buildTodayScenario(asset, ohlc, { label: key, asset: key, hourlyBars: hist, now: cut, driftK, mcSeed: 7 });
     if (!t) continue;
     const close = after.at(-1).c, hi = Math.max(...after.map(b => b.h)), lo = Math.min(...after.map(b => b.l));
     const real = realized(t, close);
@@ -69,8 +70,7 @@ export async function backtestAsset(key, { days = 120, hourUtc = 9, fetchChart =
     const brierRange = ['up', 'dn', 'rg'].reduce((s, k) => s + ((k === 'rg' ? 1 : 0) - (real === k ? 1 : 0)) ** 2, 0); // Baseline "immer Range"
     const brierUni = ['up', 'dn', 'rg'].reduce((s, k) => s + (1 / 3 - (real === k ? 1 : 0)) ** 2, 0);          // Baseline 1/3
     // Random-Walk-Baseline: gleiche Vola, gleiche Restzeit, keine Information
-    const allBars = daysAll.slice(Math.max(0, i - 25), i).flatMap(d => d.bars).concat(before);
-    const pRW = randomWalkProbs(px, t, after.length, hourlySigma(allBars));
+    const pRW = randomWalkProbs(px, t, after.length, hourlySigma(hist));
     const brierRW = ['up', 'dn', 'rg'].reduce((s, k) => s + (pRW[k] - (real === k ? 1 : 0)) ** 2, 0);
     const rwBase = Object.entries(pRW).sort((a, b) => b[1] - a[1])[0][0];
     rows.push({ date: new Date(day.t).toISOString().slice(0, 10), regime: ohlc.regime, price: r(px, 2), close: r(close, 2), movePct: r(move / px * 100, 2),
@@ -106,7 +106,7 @@ function summarize(key, rows, hourUtc) {
   return { asset: key, days: n, decisionTimeUtc: `${String(hourUtc).padStart(2, '0')}:00`, from: rows[0]?.date, to: rows.at(-1)?.date,
     baseHitPct: pct(rows.map(x => x.baseHit)), rwBaseHitPct, targetHitPct: pct(rows.map(x => x.targetHit)), leanHitPct: lh, brier, brierBaselineRandomWalk: brierRW, brierBaselineRange: brierRange, brierBaselineUniform: brierUni,
     realizedDist, byRegime, byBase, calibration: calib, verdict: verdict.join(' '),
-    caveats: ['Tages-Score ist nur ein Trend-Proxy (Makro/COT/Crowd historisch nicht verfügbar).', 'Events (Earnings/Kalender) historisch nicht berücksichtigt.', 'UTC-Tage statt Börsentage; Entscheidungszeit fix.'],
+    caveats: ['Modell = Monte Carlo (Stundenvola × Restzeit); mit drift=0 muss es dem Random Walk entsprechen – Unterschiede sind MC-Rauschen.', 'Tages-Score ist nur ein Trend-Proxy (Makro/COT/Crowd historisch nicht verfügbar) – Drift-Tests damit nur eingeschränkt aussagekräftig.', 'Events (Earnings/Kalender) historisch nicht berücksichtigt.', 'UTC-Tage statt Börsentage; Entscheidungszeit fix.'],
     rows: rows.slice(-60) };
 }
 

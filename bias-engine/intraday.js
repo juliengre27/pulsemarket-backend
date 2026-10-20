@@ -143,14 +143,14 @@ export async function computeIntraday({ assets = { GOLD: 'GC=F', NAS100: 'NQ=F',
   const [rates, oil, fed, earn, ffN, ffT, ...charts] = await Promise.all([
     ratesLive(), oilImpulse(), fedFunds(fredFn), earningsRisk(now), ffNext ? Promise.resolve(ffNext) : safe(S.ffNextWeek()),
     ff ? Promise.resolve(ff) : safe(S.ffWeek()), // standalone (/bias/intraday): Wochenkalender selbst holen (RAM-Cache, kein Extra-Request)
-    ...keys.flatMap(k => [safe(S.yahooChart(assets[k], '1d', '3mo')), safe(S.yahooChart(assets[k], '1h', '5d'))]),
+    ...keys.flatMap(k => [safe(S.yahooChart(assets[k], '1d', '3mo')), safe(S.yahooChart(assets[k], '1h', '1mo'))]), // 1mo Stundenkerzen: Session-Range + Stundenvola für das Monte-Carlo-Tagesszenario
   ]);
-  const structure = {}; keys.forEach((k, i) => { structure[k] = structureFromBars(charts[2 * i], charts[2 * i + 1], now); });
+  const structure = {}, hourly = {}; keys.forEach((k, i) => { structure[k] = structureFromBars(charts[2 * i], charts[2 * i + 1], now); hourly[k] = charts[2 * i + 1]?.bars || null; });
   const upcoming = upcomingUsd(ffT?.events || [], ffN?.events || [], now);
   const health = { yahoo_rates: { stale: !rates.ok, error: rates.ok ? null : '^TNX/^FVX nicht ladbar', fetchedAt: rates.ok ? new Date().toISOString() : null },
     yahoo_oil: { stale: !oil.ok, error: oil.ok ? null : 'CL=F nicht ladbar', fetchedAt: oil.ok ? new Date().toISOString() : null },
     yahoo_fedfunds: { stale: !fed.ok, error: fed.ok ? null : fed.note, fetchedAt: fed.ok ? new Date().toISOString() : null },
     finnhub_earnings: { stale: !earn.ok, error: earn.ok ? null : 'Finnhub Earnings nicht ladbar', fetchedAt: earn.ok ? new Date().toISOString() : null },
     forexfactory_next: { stale: !ffN?.events, error: ffN?.events ? null : (ffN?.error || 'nextweek nicht ladbar'), fetchedAt: ffN?.fetchedAt ?? null, note: ffN?.events ? null : 'FOMC-Termine aus fester Liste' } };
-  return { generatedAt: new Date(now).toISOString(), rates, oil, fedFunds: fed, earnings: earn, structure, upcoming, ffNextEvents: ffN?.events || [], health };
+  return { generatedAt: new Date(now).toISOString(), rates, oil, fedFunds: fed, earnings: earn, structure, hourly, upcoming, ffNextEvents: ffN?.events || [], health };
 }

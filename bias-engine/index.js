@@ -97,13 +97,14 @@ export async function computeBias() {
 
   // ---- Tagesszenario (heute) aus PDH/PDL/ATR + Events der nächsten 20 h ----
   const evToday = eventsForToday(d.ff?.events || [], intra.earnings?.upcoming || []);
-  gold.today = buildTodayScenario(gold, ohlc.GOLD, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'Gold' });
-  nas.today  = buildTodayScenario(nas,  ohlc.NAS100, { eventsToday: evToday, label: 'NAS100' });
-  btc.today  = buildTodayScenario(btc,  ohlc.BTC, { eventsToday: evToday.filter(e => /-Zahlen$/.test(e.title) ? e.weight >= 0.9 : true), label: 'Bitcoin' });
+  const hb = intra.hourly || {};
+  gold.today = buildTodayScenario(gold, ohlc.GOLD, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'Gold', asset: 'GOLD', hourlyBars: hb.GOLD });
+  nas.today  = buildTodayScenario(nas,  ohlc.NAS100, { eventsToday: evToday, label: 'NAS100', asset: 'NAS100', hourlyBars: hb.NAS100 });
+  btc.today  = buildTodayScenario(btc,  ohlc.BTC, { eventsToday: evToday.filter(e => /-Zahlen$/.test(e.title) ? e.weight >= 0.9 : true), label: 'Bitcoin', asset: 'BTC', hourlyBars: hb.BTC });
   // DXY: keine Retail-Level übergeben – die sind EURUSD-Kurse und würden als DXY-Support fehlinterpretiert
   const dxyAsset = { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct, crowd: { ...dxyParts.crowd, trapped: null, levels: null } }, levels: null, regime: dxyStruct?.regime ?? null };
   const dxyScen = buildScenarios(dxyAsset, d.dxy.closes, { eventRisk, label: 'DXY' });
-  const dxyToday = buildTodayScenario(dxyAsset, ohlc.DXY, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'DXY', asset: 'DXY' });
+  const dxyToday = buildTodayScenario(dxyAsset, ohlc.DXY, { eventsToday: evToday.filter(e => !/-Zahlen$/.test(e.title)), label: 'DXY', asset: 'DXY', hourlyBars: hb.DXY });
 
   // Vorwarnung für den Wochenhorizont: schweres Event (FOMC/CPI/NFP) in 5–10 Tagen liegt außerhalb des 5-Tage-eventRisk
   const heavyAhead = (intra.upcoming || []).filter(u => u.heavy);
@@ -114,7 +115,7 @@ export async function computeBias() {
     dxy: { horizons: dxyOut, components: { ...dxyParts, structure: dxyStruct }, surprise, rates, vix: vixNow, scenarios: dxyScen, today: dxyToday },
     eventsToday: evToday,
     eventRisk, earningsRisk: earnRisk, weekWarning,
-    intraday: { rates: intra.rates, oil: intra.oil, fedFunds: intra.fedFunds, earnings: intra.earnings, upcoming: intra.upcoming, generatedAt: intra.generatedAt, error: intra.error ?? null },
+    intraday: { rates: intra.rates, oil: intra.oil, fedFunds: intra.fedFunds, earnings: intra.earnings, upcoming: intra.upcoming, generatedAt: intra.generatedAt, error: intra.error ?? null }, // (hourly-Kerzen bewusst nicht ausgegeben)
     assets: { GOLD: gold, NAS100: nas, BTC: btc },
     dataHealth: { ...Object.fromEntries(Object.entries(d.sources).map(([k, v]) => [k, { stale: !!v?.stale, error: v?.error ?? null, fetchedAt: v?.fetchedAt ?? null }])), ...(intra.health || {}) },
     disclaimer: 'Beobachtung, keine Anlageberatung. Positionierungsdaten (COT) haben 3 Tage Verzögerung.',
@@ -177,9 +178,9 @@ export function registerBiasRoutes(app) {
   app.get('/bias/backtest', async (req, res) => {
     try {
       const { backtestAsset, backtestAll, backtestHtml } = await import('./backtest.js');
-      const asset = (req.query.asset || 'ALL').toUpperCase(), days = Math.min(400, +req.query.days || 120), hourUtc = Math.min(23, Math.max(0, +req.query.hour || 9));
-      const key = `${asset}:${days}:${hourUtc}`; let v = btCache.get(key);
-      if (!v || Date.now() - v.t > 6 * 3600e3) { const out = asset === 'ALL' ? await backtestAll({ days, hourUtc }) : { [asset]: await backtestAsset(asset, { days, hourUtc }) }; v = { t: Date.now(), out }; btCache.set(key, v); }
+      const asset = (req.query.asset || 'ALL').toUpperCase(), days = Math.min(400, +req.query.days || 120), hourUtc = Math.min(23, Math.max(0, +req.query.hour || 9)), driftK = isFinite(+req.query.drift) ? +req.query.drift : undefined;
+      const key = `${asset}:${days}:${hourUtc}:${driftK ?? 'def'}`; let v = btCache.get(key);
+      if (!v || Date.now() - v.t > 6 * 3600e3) { const out = asset === 'ALL' ? await backtestAll({ days, hourUtc, driftK }) : { [asset]: await backtestAsset(asset, { days, hourUtc, driftK }) }; v = { t: Date.now(), out }; btCache.set(key, v); }
       if (req.query.html === '1') { res.type('html').send(backtestHtml(v.out)); } else res.json(v.out);
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
