@@ -10,24 +10,28 @@ import * as S from './sources.js';
 import { clamp } from './scoring.js';
 
 const r = (x, d = 2) => x == null || !isFinite(x) ? null : +(+x).toFixed(d);
-const safe = async (p) => { try { const v = await p; return v?.stale && v?.error && !v?.bars && !v?.events && !v?.obs ? null : v; } catch { return null; } };
+// Fehler nicht verschlucken: ein gescheiterter Fetch kommt als {failed:true, error} zurück, damit health die Ursache zeigt
+const safe = async (p) => { try { const v = await p; return v?.stale && v?.error && !v?.bars && !v?.events && !v?.obs ? { failed: true, error: v.error } : v; } catch (e) { return { failed: true, error: String(e.message || e) }; } };
 
 // ---------- Live-Zinsen ----------
 // Yahoo liefert ^TNX/^FVX in Prozent (5.14). Falls jemals ×10 (CBOE-Konvention 51.4) → normalisieren.
 const pctNorm = v => v == null ? null : v > 25 ? v / 10 : v;
 export async function ratesLive() {
   const [tnx, fvx, irx] = await Promise.all([S.yahooChart('^TNX', '1h', '5d'), S.yahooChart('^FVX', '1h', '5d'), S.yahooChart('^IRX', '1h', '5d')].map(safe));
+  // Yahoos meta.chartPreviousClose ist bei Intraday-Charts der Schluss VOR dem 5-Tage-Fenster, nicht der Vortag.
+  // Deshalb Tagesschlüsse aus den Stundenkerzen gruppieren (Datum der Börse ≈ UTC-Datum des letzten Bars des Tages).
   const pick = (c) => {
     if (!c?.bars?.length) return null;
-    const last = pctNorm(c.last), prev = pctNorm(c.prevClose ?? c.bars.at(-1).c);
-    const first = pctNorm(c.bars[0].c);
-    return { last: r(last, 3), chgToday: r(last - prev, 3), chg5d: r(last - first, 3), asOf: c.meta?.marketTime ? new Date(c.meta.marketTime).toISOString() : null };
+    const byDay = new Map(); for (const b of c.bars) byDay.set(new Date(b.t).toISOString().slice(0, 10), b.c); // letzte Kerze je Tag gewinnt
+    const closes = [...byDay.values()].map(pctNorm);
+    const last = pctNorm(c.last ?? closes.at(-1)); const prev = closes.length >= 2 ? closes.at(-2) : last; const first = closes[0];
+    return { last: r(last, 3), chgToday: r(last - prev, 3), chg5d: r(last - first, 3), sessionDate: [...byDay.keys()].at(-1), asOf: c.meta?.marketTime ? new Date(c.meta.marketTime).toISOString() : null };
   };
   const t = pick(tnx), f = pick(fvx), i = pick(irx);
-  // Score [-2,2]: +5 bp heute im 10Y ≈ +1, +15 bp in 5 Tagen ≈ +1.2. Hawkish = positiv (USD-bullish, Gold/NAS-negativ).
+  // Score [-2,2]: +7 bp am letzten Handelstag im 10Y ≈ +1, +17 bp über 5 Tage ≈ +1. Hawkish = positiv (USD-bullish, Gold/NAS-negativ).
   let s = 0, n = 0;
-  if (t) { s += clamp(t.chgToday * 20, -1.5, 1.5) * 0.5 + clamp(t.chg5d * 8, -1.5, 1.5) * 0.5; n++; }
-  if (f) { s += clamp(f.chgToday * 20, -1.5, 1.5) * 0.5 + clamp(f.chg5d * 8, -1.5, 1.5) * 0.5; n++; }
+  if (t) { s += clamp(t.chgToday * 15, -1.5, 1.5) * 0.5 + clamp(t.chg5d * 6, -1.5, 1.5) * 0.5; n++; }
+  if (f) { s += clamp(f.chgToday * 15, -1.5, 1.5) * 0.5 + clamp(f.chg5d * 6, -1.5, 1.5) * 0.5; n++; }
   const curve = t && f ? r(t.last - f.last, 3) : null;
   return { score: r(n ? clamp(s / n * 1.3) : 0), us10y: t, us5y: f, us3m: i, curve10y5y: curve, ok: n > 0 };
 }
@@ -114,14 +118,21 @@ export function structureFromBars(daily, hourly, now = Date.now()) {
 }
 
 // ---------- 10-Tage-Vorschau High-Impact-USD ----------
+// FOMC-Termine fest hinterlegt (Entscheidung 19:00 UTC / 20:00 Berlin), damit die Vorschau auch ohne FF-Nächste-Woche nie das FOMC verliert.
+export const FOMC_DATES = ['2026-10-28', '2026-12-09', '2027-01-27', '2027-03-17'];
 const HEAVY = /cpi|non-farm|nfp|fomc|federal funds|pce|unemployment rate|gdp|ism/i;
 export function upcomingUsd(thisWeek = [], nextWeek = [], now = Date.now()) {
-  const seen = new Set(); const out = [];
+  const seen = new Set(); const out = []; let fomcSeen = false;
   for (const e of [...thisWeek, ...nextWeek]) {
     if (e.country !== 'USD' || e.impact !== 'High' || !e.timestamp) continue;
     const k = e.title + e.timestamp; if (seen.has(k)) continue; seen.add(k);
     const daysTo = (e.timestamp * 1000 - now) / 864e5; if (daysTo < -0.2 || daysTo > 10) continue;
+    if (/fomc|federal funds/i.test(e.title || '')) fomcSeen = true;
     out.push({ title: e.title, at: new Date(e.timestamp * 1000).toISOString(), daysTo: r(daysTo, 1), heavy: HEAVY.test(e.title || '') });
+  }
+  if (!fomcSeen) for (const d of FOMC_DATES) {
+    const t = Date.parse(d + 'T19:00:00Z'); const daysTo = (t - now) / 864e5;
+    if (daysTo >= -0.2 && daysTo <= 10) out.push({ title: 'FOMC Statement / Federal Funds Rate', at: new Date(t).toISOString(), daysTo: r(daysTo, 1), heavy: true, source: 'fest hinterlegt' });
   }
   return out.sort((a, b) => a.daysTo - b.daysTo);
 }
@@ -129,16 +140,17 @@ export function upcomingUsd(thisWeek = [], nextWeek = [], now = Date.now()) {
 // ---------- Gesamtpaket ----------
 export async function computeIntraday({ assets = { GOLD: 'GC=F', NAS100: 'NQ=F', BTC: 'BTC-USD', DXY: 'DX-Y.NYB' }, ff = null, ffNext = null, fredFn = S.fred, now = Date.now() } = {}) {
   const keys = Object.keys(assets);
-  const [rates, oil, fed, earn, ffN, ...charts] = await Promise.all([
+  const [rates, oil, fed, earn, ffN, ffT, ...charts] = await Promise.all([
     ratesLive(), oilImpulse(), fedFunds(fredFn), earningsRisk(now), ffNext ? Promise.resolve(ffNext) : safe(S.ffNextWeek()),
+    ff ? Promise.resolve(ff) : safe(S.ffWeek()), // standalone (/bias/intraday): Wochenkalender selbst holen (RAM-Cache, kein Extra-Request)
     ...keys.flatMap(k => [safe(S.yahooChart(assets[k], '1d', '3mo')), safe(S.yahooChart(assets[k], '1h', '5d'))]),
   ]);
   const structure = {}; keys.forEach((k, i) => { structure[k] = structureFromBars(charts[2 * i], charts[2 * i + 1], now); });
-  const upcoming = upcomingUsd(ff?.events || [], ffN?.events || [], now);
+  const upcoming = upcomingUsd(ffT?.events || [], ffN?.events || [], now);
   const health = { yahoo_rates: { stale: !rates.ok, error: rates.ok ? null : '^TNX/^FVX nicht ladbar', fetchedAt: rates.ok ? new Date().toISOString() : null },
     yahoo_oil: { stale: !oil.ok, error: oil.ok ? null : 'CL=F nicht ladbar', fetchedAt: oil.ok ? new Date().toISOString() : null },
     yahoo_fedfunds: { stale: !fed.ok, error: fed.ok ? null : fed.note, fetchedAt: fed.ok ? new Date().toISOString() : null },
     finnhub_earnings: { stale: !earn.ok, error: earn.ok ? null : 'Finnhub Earnings nicht ladbar', fetchedAt: earn.ok ? new Date().toISOString() : null },
-    forexfactory_next: { stale: !ffN?.events, error: ffN?.events ? null : (ffN?.error || 'nextweek nicht ladbar'), fetchedAt: ffN?.fetchedAt ?? null } };
+    forexfactory_next: { stale: !ffN?.events, error: ffN?.events ? null : (ffN?.error || 'nextweek nicht ladbar'), fetchedAt: ffN?.fetchedAt ?? null, note: ffN?.events ? null : 'FOMC-Termine aus fester Liste' } };
   return { generatedAt: new Date(now).toISOString(), rates, oil, fedFunds: fed, earnings: earn, structure, upcoming, ffNextEvents: ffN?.events || [], health };
 }
